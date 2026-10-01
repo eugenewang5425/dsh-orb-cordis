@@ -301,8 +301,14 @@ export class FloatingPlacement {
     const bounds = this.window.getBounds()
     if (!isCollapsed(bounds) && this.docked === undefined) {
       this.anchor = origin
-      const direction = this.direction
-      this.window.setBounds(overlayBoundsFromBall(origin, direction))
+      // Re-derive the growth side from the ball's display on every step: a stale
+      // direction flings the panel to the other side of the ball (and off-screen,
+      // it was never clamped here) the moment the drag crosses a seam, and the
+      // release re-expand then flips it back — the reported "teleport".
+      const display = this.displayAt(origin)
+      const next = expandedOverlayBounds(origin, display.workArea)
+      this.direction = { horizontal: next.horizontal, vertical: next.vertical }
+      this.window.setBounds({ x: next.x, y: next.y, width: next.width, height: next.height })
       return { docked: undefined }
     }
     this.anchor = undefined

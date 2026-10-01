@@ -104,4 +104,21 @@ describe('collapsing an expanded panel that spans a display seam', () => {
     const origin = { x: bounds().x + CHROME_INSET, y: bounds().y + CHROME_INSET }
     assert.ok(origin.x < 0, `ball origin x=${origin.x}, expected on the secondary`)
   })
+
+  it('keeps an expanded drag clamped on the ball display and stable at release', async () => {
+    // Agent-running drags move the EXPANDED panel. The panel must follow the
+    // ball's display — clamped, growth side re-derived — instead of flying
+    // off-screen with a stale direction, and the release re-expand must not
+    // flip it to the other side of the ball (the reported teleport).
+    const { placed, bounds } = placedAt(1848, 563)
+    placed.setExpanded(true)
+    placed.move(-821, 168)
+    const during = { ...bounds() }
+    assert.ok(during.y >= -12, `panel y=${during.y} left the secondary work area`)
+    assert.ok(during.x + during.width <= 12, `panel right edge=${during.x + during.width} crossed the seam`)
+    assert.ok(during.x >= -1463, `panel x=${during.x} left the secondary`)
+    await placed.clamp()
+    const released = { ...bounds() }
+    assert.deepEqual(released, during)
+  })
 })
