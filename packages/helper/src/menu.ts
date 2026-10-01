@@ -51,3 +51,36 @@ export function contextMenuTemplate(state: ContextMenuState, zh: boolean, action
     },
   ]
 }
+
+export interface TrayMenuState {
+  readonly openMain: boolean
+}
+
+export interface TrayMenuActions {
+  toggleVisible(): void
+  openMain(): void
+  disable(): void
+}
+
+/**
+ * System-tray menu: the one handle that survives a hidden ball or a closed
+ * main window — summon, reopen, and stop without the settings page.
+ */
+export function trayMenuTemplate(state: TrayMenuState, zh: boolean, actions: TrayMenuActions): MenuItem[] {
+  return [
+    {
+      label: zh ? '显示/隐藏悬浮球' : 'Show / Hide Floating Ball',
+      click: () => { actions.toggleVisible() },
+    },
+    {
+      label: zh ? '打开主窗口' : 'Open Main Window',
+      enabled: state.openMain,
+      click: () => { actions.openMain() },
+    },
+    { type: 'separator' },
+    {
+      label: zh ? '停用悬浮球' : 'Disable floating ball',
+      click: () => { actions.disable() },
+    },
+  ]
+}
