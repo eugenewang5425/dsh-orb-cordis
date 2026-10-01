@@ -251,11 +251,15 @@ export function initialWindowBounds(workArea: Rect): Rect {
 /**
  * Owns expand direction and dock state for one overlay window.
  * Dock is committed on pointer-up, not while the ball is still moving.
+ * Every display decision keys off the ball origin ({@link anchor}), never the
+ * panel center: an expanded panel can span a display seam, and clamping the
+ * ball against the panel's display would fling it onto the wrong screen.
  */
 export class FloatingPlacement {
   private direction: Direction = { horizontal: 'left', vertical: 'up' }
   private docked: { side: DockSide; y: number } | undefined
   private anim = 0
+  private anchor: { x: number; y: number } | undefined
 
   constructor(private readonly window: {
     getBounds(): Rect
@@ -265,20 +269,25 @@ export class FloatingPlacement {
   /** Resize between the ball and the panel while keeping the ball origin fixed. */
   setExpanded(expanded: boolean): ExpandState {
     const bounds = this.window.getBounds()
-    const display = this.displayAt(center(bounds))
     if (expanded) {
-      const origin = this.currentBallOrigin(display.workArea)
+      const origin = this.currentBallOrigin()
+      this.anchor = origin
       this.docked = undefined
+      const display = this.displayAt(origin)
       const next = expandedOverlayBounds(origin, display.workArea)
       this.direction = { horizontal: next.horizontal, vertical: next.vertical }
       this.window.setBounds({ x: next.x, y: next.y, width: next.width, height: next.height })
       return { expanded: true, ...this.direction, docked: undefined }
     }
     if (this.docked) {
+      const display = this.displayAt(center(bounds))
       this.applyTab(this.docked.side, this.docked.y, display.bounds)
       return { expanded: false, ...this.direction, docked: this.docked.side }
     }
-    const origin = clampedBallOrigin(this.currentBallOrigin(display.workArea), display.workArea)
+    const raw = this.anchor ?? this.currentBallOrigin()
+    this.anchor = undefined
+    const display = this.displayAt(raw)
+    const origin = clampedBallOrigin(raw, display.workArea)
     this.window.setBounds(collapsedWindowBounds(origin))
     return { expanded: false, ...this.direction, docked: undefined }
   }
@@ -291,10 +300,12 @@ export class FloatingPlacement {
     const origin = { x: Math.round(x), y: Math.round(y) }
     const bounds = this.window.getBounds()
     if (!isCollapsed(bounds) && this.docked === undefined) {
+      this.anchor = origin
       const direction = this.direction
       this.window.setBounds(overlayBoundsFromBall(origin, direction))
       return { docked: undefined }
     }
+    this.anchor = undefined
     if (!canDock) {
       this.docked = undefined
       this.anim += 1
@@ -315,13 +326,14 @@ export class FloatingPlacement {
   /** Pull a free ball inside the work area, or dock it when it already overlaps a side edge. */
   async clamp(canDock = true): Promise<DockState> {
     const bounds = this.window.getBounds()
-    const display = this.displayAt(center(bounds))
     if (this.docked) {
+      const display = this.displayAt(center(bounds))
       this.applyTab(this.docked.side, this.docked.y, display.bounds)
       return { docked: this.docked.side }
     }
     if (isCollapsed(bounds)) {
       const origin = { x: bounds.x + CHROME_INSET, y: bounds.y + CHROME_INSET }
+      const display = this.displayAt(origin)
       if (canDock) {
         const side = dockSideForBallOrigin(origin, display.bounds, this.displayBounds())
         if (side) return this.snap(side, origin.y, display.bounds)
@@ -340,12 +352,14 @@ export class FloatingPlacement {
     const start = offScreenBallOrigin(this.docked.side, this.docked.y, display.bounds)
     const end = insideBallOrigin(this.docked.side, this.docked.y, display)
     this.docked = undefined
+    this.anchor = undefined
     this.window.setBounds(collapsedWindowBounds(start))
     await this.animate(collapsedWindowBounds(end), DOCK_SLIDE_IN_MS, easeOutCubic)
     return { docked: undefined }
   }
 
-  private currentBallOrigin(workArea: Rect): { x: number; y: number } {
+  private currentBallOrigin(): { x: number; y: number } {
+    if (this.anchor) return this.anchor
     const bounds = this.window.getBounds()
     if (this.docked) return insideBallOrigin(this.docked.side, this.docked.y, this.displayAt(center(bounds)))
     if (isCollapsed(bounds)) return { x: bounds.x + CHROME_INSET, y: bounds.y + CHROME_INSET }
