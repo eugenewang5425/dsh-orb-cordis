@@ -31,11 +31,11 @@ export function contextMenuTemplate(state: ContextMenuState, zh: boolean, action
       click: () => { actions.openMain() },
     },
     {
-      label: zh ? '悬浮球 Agent 模型' : 'Floating-ball Agent model',
+      label: zh ? '悬浮球 Agent 设置' : 'Floating-ball Agent settings',
       submenu: modelMenuItems(state.catalog, state.overlay, actions.setOverlay, labels),
     },
     {
-      label: zh ? '后台 Agent 模型' : 'Background Agent model',
+      label: zh ? '后台 Agent 设置' : 'Background Agent settings',
       submenu: modelMenuItems(state.catalog, state.background, actions.setBackground, labels),
     },
     {
@@ -46,7 +46,7 @@ export function contextMenuTemplate(state: ContextMenuState, zh: boolean, action
     },
     { type: 'separator' },
     {
-      label: zh ? '停用悬浮球' : 'Disable floating ball',
+      label: zh ? '关闭悬浮球' : 'Close floating ball',
       click: () => { actions.disable() },
     },
   ]
@@ -79,7 +79,7 @@ export function trayMenuTemplate(state: TrayMenuState, zh: boolean, actions: Tra
     },
     { type: 'separator' },
     {
-      label: zh ? '停用悬浮球' : 'Disable floating ball',
+      label: zh ? '关闭悬浮球' : 'Close floating ball',
       click: () => { actions.disable() },
     },
   ]
