@@ -177,6 +177,40 @@ describe('display topology recovery', () => {
   })
 })
 
+describe('docked tabs in usable work areas', () => {
+  for (const side of ['left', 'right'] as const) {
+    it(`initial ${side} docking respects taskbar offsets on a negative-coordinate display`, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+      const display = pair(-900, -1000, 900, 1000, { x: -860, y: -970, width: 820, height: 930 })
+      const f = fixture([display], side === 'left' ? -917 : -55, -10)
+      const docking = f.placement.clamp()
+      t.mock.timers.tick(300)
+      assert.equal((await docking).docked, side)
+      assertRectInside(f.bounds, display.workArea)
+    })
+
+    it(`a recovered ${side} tab stays usable through clamp, collapse and docked move`, async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+      const x = side === 'left' ? -17 : 1865
+      const f = fixture([primary], x, 1000)
+      const docking = f.placement.clamp()
+      t.mock.timers.tick(300)
+      assert.equal((await docking).docked, side)
+      const display = pair(0, 0, 1920, 1080, { x: 40, y: 30, width: 1840, height: 1000 })
+      f.displays = [display]
+      f.placement.recoverDisplays(f.displays)
+      assertRectInside(f.bounds, display.workArea)
+      assert.equal((await f.placement.clamp()).docked, side)
+      assertRectInside(f.bounds, display.workArea)
+      assert.equal(f.placement.setExpanded(false).docked, side)
+      assertRectInside(f.bounds, display.workArea)
+      // Stay within the drag-off threshold; the initial ball origin only triggers docking.
+      assert.equal(f.placement.move(side === 'left' ? -17 : 1910, 1000).docked, side)
+      assertRectInside(f.bounds, display.workArea)
+    })
+  }
+})
+
 describe('screen event subscriptions', () => {
   it('recovers on added, removed, and relevant metrics events without showing a hidden ball', () => {
     const f = fixture([left, primary], -1000, 500)

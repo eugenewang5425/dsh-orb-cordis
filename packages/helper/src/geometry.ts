@@ -271,7 +271,7 @@ export class FloatingPlacement {
       return { expanded: true, ...this.direction, docked: undefined }
     }
     if (this.docked) {
-      this.applyTab(this.docked.side, this.docked.y, display.bounds)
+      this.applyTab(this.docked.side, this.docked.y, display.workArea)
       return { expanded: false, ...this.direction, docked: this.docked.side }
     }
     const origin = clampedBallOrigin(this.currentBallOrigin(display.workArea), display.workArea)
@@ -299,7 +299,7 @@ export class FloatingPlacement {
     }
     const display = this.displayAt(origin)
     if (this.docked && staysDocked(this.docked.side, origin.x, display.bounds)) {
-      this.applyTab(this.docked.side, this.docked.y, display.bounds)
+      this.applyTab(this.docked.side, this.docked.y, display.workArea)
       return { docked: this.docked.side }
     }
     this.docked = undefined
@@ -313,14 +313,14 @@ export class FloatingPlacement {
     const bounds = this.window.getBounds()
     const display = this.displayAt(center(bounds))
     if (this.docked) {
-      this.applyTab(this.docked.side, this.docked.y, display.bounds)
+      this.applyTab(this.docked.side, this.docked.y, display.workArea)
       return { docked: this.docked.side }
     }
     if (isCollapsed(bounds)) {
       const origin = { x: bounds.x + CHROME_INSET, y: bounds.y + CHROME_INSET }
       if (canDock) {
         const side = dockSideForBallOrigin(origin, display.bounds, this.displayBounds())
-        if (side) return this.snap(side, origin.y, display.bounds)
+        if (side) return this.snap(side, origin.y, display)
       }
       this.window.setBounds(collapsedWindowBounds(clampedBallOrigin(origin, display.workArea)))
       return { docked: undefined }
@@ -395,8 +395,9 @@ export class FloatingPlacement {
     this.window.setBounds(dockedTabBounds(side, y, bounds))
   }
 
-  private async snap(side: DockSide, ballY: number, bounds: Rect): Promise<DockState> {
-    const y = clampBallY(ballY, bounds)
+  private async snap(side: DockSide, ballY: number, display: DisplayPair): Promise<DockState> {
+    const bounds = display.bounds
+    const y = clampBallY(ballY, display.workArea)
     this.docked = { side, y }
     const generation = this.anim + 1
     await this.animate(
@@ -405,7 +406,7 @@ export class FloatingPlacement {
       easeInOutCubic,
     )
     if (generation !== this.anim || !this.docked || this.docked.side !== side) return { docked: this.docked?.side }
-    this.window.setBounds(dockedTabBounds(side, y, bounds))
+    this.applyTab(side, y, display.workArea)
     return { docked: side }
   }
 
