@@ -44,6 +44,8 @@ export interface ExpandState {
 
 export interface DockState {
   readonly docked: DockSide | undefined
+  readonly horizontal?: HorizontalExpand
+  readonly vertical?: VerticalExpand
 }
 
 export interface DisplayPair {
@@ -309,7 +311,7 @@ export class FloatingPlacement {
       const next = expandedOverlayBounds(origin, display.workArea)
       this.direction = { horizontal: next.horizontal, vertical: next.vertical }
       this.window.setBounds({ x: next.x, y: next.y, width: next.width, height: next.height })
-      return { docked: undefined }
+      return { docked: undefined, ...this.direction }
     }
     this.anchor = undefined
     if (!canDock) {
@@ -348,7 +350,7 @@ export class FloatingPlacement {
       return { docked: undefined }
     }
     this.setExpanded(true)
-    return { docked: undefined }
+    return { docked: undefined, ...this.direction }
   }
 
   /** Slide the ball back on screen from a docked tab. */
