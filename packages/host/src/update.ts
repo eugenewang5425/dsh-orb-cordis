@@ -1,8 +1,10 @@
 /**
  * Update check and one-click upgrade for the installed bundle.
- * GitHub Releases is the distribution channel: the check reads the repository's
- * latest release and the upgrade installs the release's tarball through the
- * official plugin manager.
+ * The check probes the package registries — npmmirror first: it mirrors npmjs
+ * and answers where GitHub stalls — and falls back to the repository's GitHub
+ * Releases when no registry knows the package. The upgrade installs the
+ * version's tarball through the official plugin manager, served by the same
+ * source that answered the check.
  */
 
 import { spawn } from 'node:child_process'
@@ -11,6 +13,9 @@ import type { ProfileStore } from './preferences.ts'
 
 /** The GitHub repository that publishes plugin releases, `plugin-v<version>` tags. */
 export const UPDATE_REPO = 'mini-yifan/dsh-orb-cordis'
+
+/** Registry sources probed before GitHub, in order. npmmirror syncs minutes after a publish. */
+export const REGISTRY_BASES = ['https://registry.npmmirror.com', 'https://registry.npmjs.org']
 
 /** How long a remembered answer stays fresh for the automatic check. */
 export const AUTO_CHECK_INTERVAL_MS = 60 * 60 * 1000
@@ -149,6 +154,8 @@ export class UpdateChecker {
   private restartRequired = false
   private timer: ReturnType<typeof setTimeout> | undefined
   private interval: ReturnType<typeof setInterval> | undefined
+  /** The registry base that answered the last check; GitHub is the fallback when none did. */
+  private source: string | undefined
 
   constructor(deps: UpdateDeps) {
     this.deps = deps
@@ -249,7 +256,7 @@ export class UpdateChecker {
     this.error = null
     this.pendingBuilds = []
     try {
-      const result = await manager.installBundle(releaseTarballUrl(version), {
+      const result = await manager.installBundle(installSpec(version, this.source, this.own.name), {
         requestId: `dsh-orb-update-${Date.now()}`,
         ...approvedBuilds === undefined ? {} : { approvedBuilds },
       })
@@ -284,8 +291,21 @@ export class UpdateChecker {
     if (this.deps.fetchLatest !== undefined) return this.deps.fetchLatest(own.name)
     const forced = process.env.DSH_ORB_UPDATE_LATEST?.trim()
     if (forced !== undefined && forced !== '') return forced
+    this.source = undefined
+    let answered = false
+    for (const base of registryBases()) {
+      const body = await curlText(`${base}/${own.name}/latest`)
+      if (body === undefined) continue
+      answered = true
+      const version = versionFromRegistry(body)
+      if (version !== undefined) {
+        this.source = base
+        return version
+      }
+      // A 404 (not synced yet) or a malformed answer: try the next source.
+    }
     const body = await curlText(`${apiBase()}/releases/latest`)
-    if (body === undefined) return undefined
+    if (body === undefined) return answered ? null : undefined
     // An empty body is the repository's 404: no release published yet, not a failure.
     return versionFromRelease(body) ?? null
   }
@@ -312,6 +332,47 @@ export function releaseTarballUrl(version: string): string {
   const overridden = process.env.DSH_ORB_UPDATE_URL?.trim()
   if (overridden !== undefined && overridden !== '') return overridden
   return `https://github.com/${UPDATE_REPO}/releases/download/${releaseTag(clean)}/dsh-orb-${clean}.tgz`
+}
+
+/** The registry sources the check probes; `DSH_ORB_UPDATE_REGISTRIES` re-points them (tests, mirrors). */
+export function registryBases(): string[] {
+  const configured = process.env.DSH_ORB_UPDATE_REGISTRIES?.trim()
+  if (configured === undefined || configured === '') return [...REGISTRY_BASES]
+  return configured
+    .split(',')
+    .map((base) => base.trim().replace(/\/+$/, ''))
+    .filter((base) => base !== '')
+}
+
+/** The version a registry's dist-tag document names: `{"version":"0.2.0"}`. */
+export function versionFromRegistry(body: string): string | undefined {
+  try {
+    const parsed = JSON.parse(body) as { version?: unknown }
+    if (typeof parsed.version !== 'string') return undefined
+    const version = parsed.version.trim().replace(/^v/, '')
+    return version === '' ? undefined : version
+  } catch {
+    return undefined
+  }
+}
+
+/** The tarball address a registry serves for a package version. */
+export function registryTarballUrl(base: string, name: string, version: string): string {
+  const clean = version.trim().replace(/^v/, '')
+  return `${base.replace(/\/+$/, '')}/${name}/-/${name}-${clean}.tgz`
+}
+
+/**
+ * The spec the installer receives: the `DSH_ORB_UPDATE_URL` override wins, then
+ * the tarball of the source that answered the check — a registry tarball is a
+ * plain https file, the same shape the manager already fetches from GitHub
+ * Releases — else the GitHub release tarball.
+ */
+export function installSpec(version: string, source: string | undefined, name: string): string {
+  const overridden = process.env.DSH_ORB_UPDATE_URL?.trim()
+  if (overridden !== undefined && overridden !== '') return overridden
+  if (source !== undefined) return registryTarballUrl(source, name, version)
+  return releaseTarballUrl(version)
 }
 
 /** The version a release names: `plugin-v0.2.0` → `0.2.0`. */

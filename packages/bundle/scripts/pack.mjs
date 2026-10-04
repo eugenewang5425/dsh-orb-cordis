@@ -115,7 +115,11 @@ try {
   // drive-letter `C:\...` argument, even for `-C`, as a remote host.
   const tarball = join(repoRoot, `dsh-orb-${manifest.version}.tgz`)
   const staged = join(stage, 'package.tgz')
-  const packed = spawnSync('tar', ['-czf', basename(staged), 'package'], { cwd: stage, stdio: 'inherit' })
+  // COPYFILE_DISABLE: macOS tar otherwise stores extended attributes as AppleDouble
+  // `._*` entries, which the npm registry rejects at publish (415 invalid path).
+  const packed = spawnSync('tar', ['-czf', basename(staged), 'package'], {
+    cwd: stage, stdio: 'inherit', env: { ...process.env, COPYFILE_DISABLE: '1' },
+  })
   if (packed.status !== 0) process.exit(packed.status ?? 1)
   try {
     await rename(staged, tarball)

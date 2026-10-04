@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { ProfileStore } from '../src/preferences.ts'
-import { AUTO_CHECK_INTERVAL_MS, compareVersions, ownPackage, releaseTarballUrl, UpdateChecker, versionFromRelease } from '../src/update.ts'
+import { AUTO_CHECK_INTERVAL_MS, compareVersions, installSpec, ownPackage, registryTarballUrl, releaseTarballUrl, UpdateChecker, versionFromRegistry, versionFromRelease } from '../src/update.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'orb-update-'))
 after(() => { rmSync(root, { recursive: true, force: true }) })
@@ -52,6 +52,35 @@ function checker(options: {
   return { update, announced, specs: fake.specs }
 }
 
+/** A local http mock answering `routes[path]` with `[status, body]`; other paths hang up. */
+async function mockServer(routes: Record<string, [number, string]>): Promise<{ base: string; close(): void }> {
+  const server = createServer((request, response) => {
+    const hit = routes[request.url ?? '']
+    if (hit === undefined) { response.destroy(); return }
+    response.writeHead(hit[0], { 'content-type': 'application/json' })
+    response.end(hit[1])
+  })
+  await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve) })
+  return { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, close: () => { server.close() } }
+}
+
+/** Sets env vars for the duration of `run`, restoring or clearing them after. */
+async function withEnv(values: Record<string, string>, run: () => Promise<void>): Promise<void> {
+  const previous = new Map(Object.keys(values).map((key) => [key, process.env[key]]))
+  for (const [key, value] of Object.entries(values)) process.env[key] = value
+  try {
+    await run()
+  } finally {
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
+/** Nothing listens here, so curl fails fast: a source that is down. */
+const DEAD_SOURCE = 'http://127.0.0.1:1'
+
 describe('update versions', () => {
   it('orders releases, patches, and prereleases', () => {
     assert.equal(compareVersions('0.2.0', '0.1.0'), 1)
@@ -80,6 +109,105 @@ describe('update versions', () => {
     process.env.DSH_ORB_UPDATE_URL = 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz'
     assert.equal(releaseTarballUrl('0.2.0'), 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz')
     delete process.env.DSH_ORB_UPDATE_URL
+  })
+})
+
+describe('update sources', () => {
+  it('reads a registry dist-tag document and its tarball address', () => {
+    assert.equal(versionFromRegistry('{"name":"dsh-orb","version":"0.2.0"}'), '0.2.0')
+    assert.equal(versionFromRegistry('{"name":"dsh-orb","version":"v0.2.0-rc.1"}'), '0.2.0-rc.1')
+    assert.equal(versionFromRegistry('{"name":"dsh-orb"}'), undefined)
+    assert.equal(versionFromRegistry('not json'), undefined)
+    assert.equal(
+      registryTarballUrl('https://registry.npmmirror.com', 'dsh-orb', '0.2.0'),
+      'https://registry.npmmirror.com/dsh-orb/-/dsh-orb-0.2.0.tgz',
+    )
+    assert.equal(
+      installSpec('0.2.0', undefined, 'dsh-orb'),
+      releaseTarballUrl('0.2.0'),
+      'GitHub stays the installer source when no registry answered',
+    )
+    process.env.DSH_ORB_UPDATE_URL = 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz'
+    assert.equal(
+      installSpec('0.2.0', 'https://registry.npmmirror.com', 'dsh-orb'),
+      'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz',
+      'the env override wins over the answering source',
+    )
+    delete process.env.DSH_ORB_UPDATE_URL
+  })
+
+  it('prefers a registry that answers and installs its tarball, over real HTTP', async () => {
+    const registry = await mockServer({ '/dsh-orb/latest': [200, '{"name":"dsh-orb","version":"0.3.0"}'] })
+    try {
+      await withEnv({ DSH_ORB_UPDATE_REGISTRIES: registry.base }, async () => {
+        const profile = store()
+        const announced: string[] = []
+        const fake = manager()
+        const update = new UpdateChecker({
+          store: profile,
+          manager: () => fake.service,
+          notify: (version) => announced.push(version),
+          own: { name: 'dsh-orb', version: '0.1.0' },
+        })
+        await update.check(true)
+        assert.deepEqual(announced, ['0.3.0'])
+        assert.equal(update.state().error, null)
+        await update.install()
+        assert.deepEqual(fake.specs, [`${registry.base}/dsh-orb/-/dsh-orb-0.3.0.tgz`])
+      })
+    } finally {
+      registry.close()
+    }
+  })
+
+  it('moves down the registry chain when one is unreachable', async () => {
+    const registry = await mockServer({ '/dsh-orb/latest': [200, '{"name":"dsh-orb","version":"0.4.0"}'] })
+    try {
+      await withEnv({ DSH_ORB_UPDATE_REGISTRIES: `${DEAD_SOURCE},${registry.base}` }, async () => {
+        const profile = store()
+        const announced: string[] = []
+        const fake = manager()
+        const update = new UpdateChecker({
+          store: profile,
+          manager: () => fake.service,
+          notify: (version) => announced.push(version),
+          own: { name: 'dsh-orb', version: '0.1.0' },
+        })
+        await update.check(true)
+        assert.deepEqual(announced, ['0.4.0'], 'the second registry answered')
+        await update.install()
+        assert.deepEqual(fake.specs, [`${registry.base}/dsh-orb/-/dsh-orb-0.4.0.tgz`])
+      })
+    } finally {
+      registry.close()
+    }
+  })
+
+  it('falls back to GitHub when no registry knows the package', async () => {
+    const registry = await mockServer({ '/dsh-orb/latest': [404, '{"error":"not found"}'] })
+    const github = await mockServer({ '/releases/latest': [200, '{"tag_name":"plugin-v0.2.0"}'] })
+    try {
+      await withEnv({ DSH_ORB_UPDATE_REGISTRIES: registry.base, DSH_ORB_UPDATE_API: github.base }, async () => {
+        const profile = store()
+        const announced: string[] = []
+        const fake = manager()
+        const update = new UpdateChecker({
+          store: profile,
+          manager: () => fake.service,
+          notify: (version) => announced.push(version),
+          own: { name: 'dsh-orb', version: '0.1.0' },
+        })
+        await update.check(true)
+        assert.deepEqual(announced, ['0.2.0'], 'the release answered after the registry 404ed')
+        await update.install()
+        assert.deepEqual(fake.specs, [
+          'https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v0.2.0/dsh-orb-0.2.0.tgz',
+        ])
+      })
+    } finally {
+      registry.close()
+      github.close()
+    }
   })
 })
 
@@ -133,63 +261,51 @@ describe('update checker', () => {
 
   it('reads a repository without releases as checked and quiet, over real HTTP', async () => {
     // The GitHub API answers 404 for /releases/latest until the first release ships.
-    const server = createServer((request, response) => {
-      if (request.url !== '/releases/latest') response.destroy()
-      response.writeHead(404, { 'content-type': 'application/json' })
-      response.end('{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}')
+    const github = await mockServer({
+      '/releases/latest': [404, '{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}'],
     })
-    await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve) })
-    const previous = process.env.DSH_ORB_UPDATE_API
-    process.env.DSH_ORB_UPDATE_API = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     try {
-      const profile = store()
-      const fake = manager()
-      const update = new UpdateChecker({
-        store: profile,
-        manager: () => fake.service,
-        notify: () => {},
-        own: { name: 'dsh-orb', version: '0.1.0' },
+      await withEnv({ DSH_ORB_UPDATE_REGISTRIES: DEAD_SOURCE, DSH_ORB_UPDATE_API: github.base }, async () => {
+        const profile = store()
+        const fake = manager()
+        const update = new UpdateChecker({
+          store: profile,
+          manager: () => fake.service,
+          notify: () => {},
+          own: { name: 'dsh-orb', version: '0.1.0' },
+        })
+        await update.check(true)
+        const state = update.state()
+        assert.equal(state.error, null, 'no release published yet is not a failure')
+        assert.equal(state.available, false)
+        assert.equal(state.latestVersion, null)
+        assert.ok(state.checkedAt !== null, 'the throttle still records the answer')
       })
-      await update.check(true)
-      const state = update.state()
-      assert.equal(state.error, null, 'no release published yet is not a failure')
-      assert.equal(state.available, false)
-      assert.equal(state.latestVersion, null)
-      assert.ok(state.checkedAt !== null, 'the throttle still records the answer')
     } finally {
-      if (previous === undefined) delete process.env.DSH_ORB_UPDATE_API
-      else process.env.DSH_ORB_UPDATE_API = previous
-      server.close()
+      github.close()
     }
   })
 
   it('resolves the latest version through curl end to end', async () => {
-    const server = createServer((request, response) => {
-      if (request.url !== '/releases/latest') response.destroy()
-      response.writeHead(200, { 'content-type': 'application/json' })
-      response.end('{"tag_name":"plugin-v0.2.0","name":"0.2.0"}')
-    })
-    await new Promise((resolve) => { server.listen(0, '127.0.0.1', resolve) })
-    const previous = process.env.DSH_ORB_UPDATE_API
-    process.env.DSH_ORB_UPDATE_API = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+    const github = await mockServer({ '/releases/latest': [200, '{"tag_name":"plugin-v0.2.0","name":"0.2.0"}'] })
     try {
-      const profile = store()
-      const announced: string[] = []
-      const fake = manager()
-      const update = new UpdateChecker({
-        store: profile,
-        manager: () => fake.service,
-        notify: (version) => announced.push(version),
-        own: { name: 'dsh-orb', version: '0.1.0' },
+      await withEnv({ DSH_ORB_UPDATE_REGISTRIES: DEAD_SOURCE, DSH_ORB_UPDATE_API: github.base }, async () => {
+        const profile = store()
+        const announced: string[] = []
+        const fake = manager()
+        const update = new UpdateChecker({
+          store: profile,
+          manager: () => fake.service,
+          notify: (version) => announced.push(version),
+          own: { name: 'dsh-orb', version: '0.1.0' },
+        })
+        await update.check(true)
+        assert.deepEqual(announced, ['0.2.0'])
+        assert.equal(update.state().available, true)
+        assert.equal(update.state().error, null)
       })
-      await update.check(true)
-      assert.deepEqual(announced, ['0.2.0'])
-      assert.equal(update.state().available, true)
-      assert.equal(update.state().error, null)
     } finally {
-      if (previous === undefined) delete process.env.DSH_ORB_UPDATE_API
-      else process.env.DSH_ORB_UPDATE_API = previous
-      server.close()
+      github.close()
     }
   })
 
