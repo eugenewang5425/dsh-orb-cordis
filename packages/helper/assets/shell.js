@@ -1823,8 +1823,17 @@ function main() {
       const skipDock = skipDockCommit
       skipDockCommit = false
       if (!skipDock) {
+        // Releasing the pointer fires body pointerenter while the clamp roundtrip is
+        // still in flight; an expand in that window clears the dock that snap is
+        // committing and the tab never appears (#62). Hold expansion until the
+        // clamp answer says whether this release docked.
+        suppressExpand = true
         if (origin !== undefined) await moveBall(origin.x, origin.y)
         await clampBall()
+        if (docked === undefined) {
+          suppressExpand = false
+          if (dockPointerInside) void setExpanded(true)
+        }
       }
       return true
     }
