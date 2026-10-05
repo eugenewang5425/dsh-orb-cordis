@@ -14,7 +14,7 @@ declare module '@deepseek-ai/dsh-llm' {
     'computer-use': { kind: 'computer-use' } & ContextFormed
   }
 }
-import type { SessionId, UserMessage } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId, UserMessage } from '@deepseek-ai/dsh-session'
 
 /** Plugin id recorded on the parked completion notice. */
 export const COMPLETION_PLUGIN = 'tool-code-agent'
@@ -24,10 +24,23 @@ export const COMPLETION_BODY_MAX_CHARS = 4000
 
 const NO_ASSISTANT = 'The Code agent session ended without a final assistant message.'
 
-/** Host agent registry methods the watch uses after `session.prompt` accepts. */
+/**
+ * Appended when another Computer Use session holds a turn at delivery time. Without it the woken
+ * caller would resume GUI work — possibly on a chat the user abandoned — and fight the session the
+ * user is watching for the mouse and keyboard.
+ */
+const SCREEN_BUSY_SUFFIX =
+  'Another Computer Use chat is operating the screen right now. '
+  + 'Report this result as text only; do not perform any GUI actions unless the user asks again in this chat.'
+
+/**
+ * Host agent registry methods the watch uses after `session.prompt` accepts. `list` and
+ * `isOwnedBy` exist on the live `AgentRegistry`; test fakes may omit them.
+ */
 export interface CodeAgentLookup {
   get(id: SessionId): Agent | undefined
   withoutInitiator<T>(operation: () => T): T
+  list?(): readonly Agent[]
 }
 
 /** One accepted `code_agent` prompt and the two live Agents that own its interval. */
@@ -82,7 +95,10 @@ async function runWatch(watch: CodeAgentCompletionWatch, signal: AbortSignal): P
     if (await raceAbort(signal, watch.caller.whenIdle()) === 'aborted') return
     if (watch.agents.get(watch.caller.id) !== watch.caller) return
     watch.caller.followup(createUserMessage({
-      content: [{ type: 'text', text: completionNoticeText(watch.sessionId, watch.task, outcome) }],
+      content: [{
+        type: 'text',
+        text: completionNoticeText(watch.sessionId, watch.task, outcome, anotherComputerUseRunning(watch)),
+      }],
       source: {
         kind: 'computer-use',
         form: 'notice',
@@ -175,8 +191,36 @@ function lastAssistantText(code: Agent): string | undefined {
   return undefined
 }
 
-function completionNoticeText(sessionId: SessionId, task: string, outcome: string): string {
+/**
+ * Whether a Computer Use session other than the caller currently holds a turn.
+ * The caller's own background Code sessions are standard-preset, so they never
+ * count; a registry without `list` (test fakes) reads as an empty screen.
+ */
+function anotherComputerUseRunning(watch: CodeAgentCompletionWatch): boolean {
+  const agents = watch.agents.list?.() ?? []
+  return agents.some(other => (
+    other.id !== watch.caller.id
+    && other.status === 'running'
+    && presetOf(other) === 'computer-use'
+  ))
+}
+
+/** Session preset of a live agent, tolerant of test fakes that carry no header. */
+function presetOf(agent: Agent): string | undefined {
+  const session = agent.session as Session | undefined
+  return session?.header?.agentPreset
+}
+
+function completionNoticeText(
+  sessionId: SessionId,
+  task: string,
+  outcome: string,
+  screenBusy: boolean,
+): string {
   const body = `Background Code agent session ${sessionId} finished this task:\n${task}\n\n${outcome}`
-  if (body.length <= COMPLETION_BODY_MAX_CHARS) return body
-  return `${body.slice(0, COMPLETION_BODY_MAX_CHARS - 1)}…`
+  const capped = body.length <= COMPLETION_BODY_MAX_CHARS
+    ? body
+    : `${body.slice(0, COMPLETION_BODY_MAX_CHARS - 1)}…`
+  // Appended after the cap so the instruction survives a truncated outcome.
+  return screenBusy ? `${capped}\n\n${SCREEN_BUSY_SUFFIX}` : capped
 }

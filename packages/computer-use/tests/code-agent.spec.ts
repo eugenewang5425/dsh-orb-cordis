@@ -62,7 +62,10 @@ interface FakeAgent {
   readonly whenIdleCalls: number
   readonly statusSubscriptions: number
   readonly cancelCalls: Array<{ cause: unknown; options?: { keepInbox?: boolean } }>
-  readonly session: { deriveMessages(): FakeMessage[] }
+  readonly session: {
+    readonly header?: { readonly agentPreset?: string }
+    deriveMessages(): FakeMessage[]
+  }
   whenIdle(): Promise<void>
   followup(message: UserMessage): void
   cancel(cause: unknown, options?: { keepInbox?: boolean }): void
@@ -86,6 +89,7 @@ function createFakeAgent(id: SessionId, options: {
   readonly status?: 'idle' | 'running'
   readonly assistant?: string
   readonly messages?: FakeMessage[]
+  readonly preset?: string
   readonly effectMode?: 'register' | 'throw' | 'abort-immediately'
   readonly followupError?: Error
   readonly warnError?: Error
@@ -125,6 +129,7 @@ function createFakeAgent(id: SessionId, options: {
     },
     cancelCalls,
     session: {
+      ...options.preset === undefined ? {} : { header: { agentPreset: options.preset } },
       deriveMessages() {
         options.onDerive?.()
         if (options.deriveError !== undefined) throw options.deriveError
@@ -342,6 +347,9 @@ async function setup(options: {
       },
       isOwnedBy() {
         return false
+      },
+      list() {
+        return [...live.values()] as Agent[]
       },
     })
   } else if (options.owned === true) {
@@ -696,6 +704,33 @@ describe('code_agent plugin', () => {
     caller.resolveIdle()
     await expect.poll(() => caller.followups.length).toBe(1)
     expect(text({ content: caller.followups[0]!.content })).toContain('Wrote the Word document.')
+  })
+
+  it('downgrades the notice while another Computer Use session is operating the screen', async () => {
+    const caller = createFakeAgent(CALLER, { status: 'idle' })
+    const code = createFakeAgent(STANDARD, { status: 'running', assistant: 'Wrote the Word document.' })
+    const other = createFakeAgent(CALLER_B, { status: 'running', preset: 'computer-use' })
+    const { ctx } = await setup({ live: new Map([[CALLER, caller], [STANDARD, code], [CALLER_B, other]]) })
+    await execute(ctx, { task: 'Write a Word document' })
+    code.resolveIdle()
+    await expect.poll(() => caller.followups.length).toBe(1)
+    const notice = text({ content: caller.followups[0]!.content })
+    expect(notice).toContain('Wrote the Word document.')
+    expect(notice).toContain('Another Computer Use chat is operating the screen right now.')
+    expect(notice).toContain('do not perform any GUI actions')
+  })
+
+  it('keeps the plain notice when only a standard-preset session is running', async () => {
+    const caller = createFakeAgent(CALLER, { status: 'idle' })
+    const code = createFakeAgent(STANDARD, { status: 'running', assistant: 'Wrote the Word document.' })
+    const other = createFakeAgent(SessionId('session-other'), { status: 'running', preset: 'standard' })
+    const { ctx } = await setup({ live: new Map([[CALLER, caller], [STANDARD, code], [SessionId('session-other'), other]]) })
+    await execute(ctx, { task: 'Write a Word document' })
+    code.resolveIdle()
+    await expect.poll(() => caller.followups.length).toBe(1)
+    const notice = text({ content: caller.followups[0]!.content })
+    expect(notice).toContain('Wrote the Word document.')
+    expect(notice).not.toContain('chat is operating the screen')
   })
 
   it('does not deliver while the Code session is still idle with the prompt unclaimed', async () => {
