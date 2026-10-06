@@ -207,7 +207,7 @@ interface BlockUsage {
 interface BlockMessage {
   readonly type: 'block'
   readonly key: string
-  readonly kind: 'user' | 'reasoning' | 'assistant' | 'tool'
+  readonly kind: 'user' | 'reasoning' | 'assistant' | 'tool' | 'notice'
   readonly text: string
   readonly running: boolean
   readonly interrupted?: true
@@ -439,7 +439,7 @@ export class OrbRuntime {
       return
     }
     console.error(`dsh-orb: helper socket 127.0.0.1:${this.port}`)
-    this.startAgentPoll()
+    this.startPolls()
     const sessionTask = this.ensureSession().catch((error: unknown) => {
       this.sessionError = error instanceof Error ? error.message : String(error)
       console.error(`dsh-orb: session setup failed: ${this.sessionError}`)
@@ -467,6 +467,7 @@ export class OrbRuntime {
    */
   async bind(): Promise<{ port: number; token: string }> {
     if (!this.server) await this.listen()
+    this.startPolls()
     return { port: this.port, token: this.token }
   }
 
@@ -787,10 +788,31 @@ export class OrbRuntime {
 
   private consume(type: string, data: unknown, seq: number): void {
     if (type === 'user/message') {
-      if (!this.replaying) return
-      const text = userText(data)
+      const record = asRecord(data)
+      const sourceKind = asRecord(record?.source)?.kind
+      if (sourceKind === 'user' || sourceKind === undefined) {
+        if (!this.replaying) return
+        const text = userText(data)
+        if (!text.trim()) return
+        this.block(`user:${seq}`, 'user', text, false, 'set')
+        return
+      }
+      // A plugin notice (e.g. the code_agent completion report): render it live
+      // and on replay as a subdued block, with model-facing guard tails stripped.
+      const text = stripNoticeGuards(textOf(record?.content))
       if (!text.trim()) return
-      this.block(`user:${seq}`, 'user', text, false, 'set')
+      this.block(`notice:${seq}`, 'notice', text, false, 'set')
+      return
+    }
+    if (type === 'turn/start') {
+      // A wake turn (e.g. the code_agent completion followup) starts without a
+      // ball prompt; the ball still shows it as running, stop button included.
+      if (this.turnRunning) return
+      this.turnRunning = true
+      this.turnInterrupted = false
+      this.selection.setSessionRunning(true)
+      this.broadcast({ type: 'turn', running: true })
+      this.armIdle()
       return
     }
     if (type === 'assistant/chunk') {
@@ -1006,7 +1028,12 @@ export class OrbRuntime {
     this.responseKeys = []
     this.broadcast({ type: 'turn', running: false, ...(this.turnInterrupted ? { interrupted: true } : {}) })
     this.turnInterrupted = false
-    this.stopWatch()
+    // The transcript poll keeps running: a completion notice can wake this
+    // session into a new turn at any time, without a ball prompt.
+    if (this.giveUp !== undefined) {
+      clearTimeout(this.giveUp)
+      this.giveUp = undefined
+    }
     const reply = [...this.blockOrder].reverse().map((key) => this.blocks.get(key)).find((item) => item?.kind === 'assistant')
     console.error(`dsh-orb: turn done reply=${reply?.text.length ?? 0}`)
   }
@@ -1608,7 +1635,7 @@ export class OrbRuntime {
     this.responseKeys = []
     this.clearDirty()
     this.selection.setSessionRunning(false)
-    this.stopWatch()
+    // The transcript poll outlives a session switch: keep it running.
     this.broadcast({ type: 'reset' })
     this.broadcast({ type: 'turn', running: false })
   }
@@ -1670,6 +1697,16 @@ export class OrbRuntime {
   private startAgentPoll(): void {
     if (this.agentTimer) return
     this.agentTimer = setInterval(() => this.pollAgents(), AGENT_POLL_MS)
+  }
+
+  /**
+   * The always-on polls: the bookmark registry, and the transcript drain. The
+   * latter runs for the whole helper lifetime, not just during ball-initiated
+   * turns — completion notices can wake the session into a new turn at any time.
+   */
+  private startPolls(): void {
+    this.startAgentPoll()
+    this.watch()
   }
 
   private stopAgentPoll(): void {
@@ -1910,6 +1947,25 @@ function userText(data: unknown): string {
   const source = asRecord(record.source)
   if (source && source.kind !== undefined && source.kind !== 'user') return ''
   return textOf(record.content)
+}
+
+/**
+ * Model-facing tails the code_agent completion notices append; the ball shows
+ * notices to the user, so the instructions come off. Unknown tails stay.
+ */
+const NOTICE_GUARDS = [
+  'Another Computer Use chat is operating the screen right now. Report this result as text only; do not perform any GUI actions unless the user asks again in this chat.',
+  'Do not restart this task and do not call code_agent for it again unless the user asks.',
+]
+
+function stripNoticeGuards(text: string): string {
+  let shown = text
+  for (const guard of NOTICE_GUARDS) {
+    while (shown.endsWith(guard)) {
+      shown = shown.slice(0, shown.length - guard.length).replace(/\n+$/, '')
+    }
+  }
+  return shown
 }
 
 function textOf(content: unknown): string {

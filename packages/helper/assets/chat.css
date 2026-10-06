@@ -37,6 +37,38 @@
   overflow-wrap: anywhere;
 }
 
+/* ----- Plugin notice (code_agent completion report) ----- */
+
+.notice-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  margin: 6px 0;
+}
+
+.notice-label {
+  padding-left: 4px;
+  font-size: 11px;
+  color: var(--dsw-alias-label-muted, color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 55%, transparent));
+}
+
+.notice-bubble {
+  width: 100%;
+  box-sizing: border-box;
+  background: color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-primary, currentColor) 12%, transparent);
+  border-radius: 14px;
+  padding: 9px 13px;
+  font-size: calc(var(--dsh-content-font-size, 14px) - 1px);
+  line-height: calc(20px + var(--dsh-content-font-delta, 0px));
+  color: var(--dsw-alias-label-secondary, var(--dsw-alias-label-primary, currentColor));
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 /* ----- Message actions (MessageIconActions: copy / turn-usage pill) ----- */
 
 .user-actions {

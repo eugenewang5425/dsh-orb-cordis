@@ -298,8 +298,8 @@ describe('ball control socket', { concurrency: 1 }, () => {
       client.send({ type: 'open', sessionId: 'session-keep' })
       await waitFor(() => client.messages.slice(mark).some((message) => message.type === 'block' && message.text === 'click'))
       const blocks = client.messages.slice(mark).filter((message) => message.type === 'block')
-      assert.deepEqual(blocks.map((message) => message.text), ['你好', '好', 'click', 'click'])
-      assert.equal(blocks.some((message) => message.text === '跳过'), false)
+      assert.deepEqual(blocks.map((message) => message.text), ['你好', '跳过', '好', 'click', 'click'])
+      assert.equal(blocks.find((message) => message.text === '跳过')?.kind, 'notice')
       assert.equal(harness.calls.create.at(-1)?.sessionId, 'session-keep')
       assert.equal(harness.calls.create.at(-1)?.agentPreset, 'computer-use')
       const creates = harness.calls.create.length
@@ -642,6 +642,37 @@ describe('ball control socket', { concurrency: 1 }, () => {
       assert.equal(harness.runtime.takeJump()?.sessionId, 'session-agent-done')
       harness.runtime.confirmJump('session-agent-done')
       assert.equal(harness.runtime.takeJump(), null)
+    } finally {
+      client.socket.destroy()
+      harness.runtime.halt()
+    }
+  })
+
+  it('renders a plugin notice live and marks the wake turn running without a ball prompt', async () => {
+    const harness = boot()
+    const client = await connect(harness.runtime)
+    try {
+      client.send({ type: 'new' })
+      await waitFor(() => client.messages.some((message) => message.type === 'session'))
+      const sessionId = (client.messages.find((message) => message.type === 'session') as { sessionId: string }).sessionId
+      const guard = 'Do not restart this task and do not call code_agent for it again unless the user asks.'
+      harness.inject(sessionId, {
+        type: 'user/message',
+        seq: 1,
+        data: {
+          source: { kind: 'computer-use', form: 'notice' },
+          content: [{ type: 'text', text: `Background Code agent session session-bg finished this task:\n写周报\n\n已完成。\n\n${guard}` }],
+        },
+      })
+      await waitFor(() => client.messages.some((message) => message.type === 'block' && message.kind === 'notice'))
+      const notice = client.messages.find((message) => message.type === 'block' && message.kind === 'notice') as { text: string }
+      assert.equal(notice.text.includes('已完成。'), true)
+      assert.equal(notice.text.includes('Do not restart this task'), false)
+
+      harness.inject(sessionId, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+      await waitFor(() => client.messages.some((message) => message.type === 'turn' && message.running === true))
+      harness.inject(sessionId, { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } })
+      await waitFor(() => client.messages.some((message) => message.type === 'turn' && message.running === false))
     } finally {
       client.socket.destroy()
       harness.runtime.halt()

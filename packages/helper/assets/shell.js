@@ -73,6 +73,7 @@ const zh = {
   agentFrom: '来自对话',
   agentDir: '工作目录',
   agentOpen: '点击在主窗口打开',
+  noticeTitle: '后台任务报告',
 }
 const en = {
   title: 'Desktop agent',
@@ -124,6 +125,7 @@ const en = {
   agentFrom: 'From chat',
   agentDir: 'Folder',
   agentOpen: 'Click to open in the main window',
+  noticeTitle: 'Background task report',
 }
 
 const PROMPT_LIMIT = 8000
@@ -358,6 +360,11 @@ function main() {
       const block = blockData.get(key)
       if (block === undefined) continue
       if (block.kind === 'user') continue
+      if (block.kind === 'notice') {
+        const label = node.querySelector('.notice-label')
+        if (label !== null) label.textContent = messages.noticeTitle
+        continue
+      }
       if (block.kind === 'reasoning') {
         node.querySelector('.think-title').textContent = messages.think
         node.querySelector('.visually-hidden').textContent = block.running ? messages.running : ''
@@ -769,7 +776,7 @@ function main() {
    * process body; a reply closes that run, so later tools open a new one.
    */
   function placeBlock(node, kind) {
-    if (kind === 'user') {
+    if (kind === 'user' || kind === 'notice') {
       closeProcess()
       transcript.append(node)
       return
@@ -1471,6 +1478,15 @@ function main() {
         actions.className = 'user-actions'
         actions.append(messageCopyButton(() => bubble.textContent ?? ''))
         node.append(bubble, actions)
+      } else if (block.kind === 'notice') {
+        node = document.createElement('div')
+        node.className = 'notice-row'
+        node.dataset.kind = 'notice'
+        const label = document.createElement('span')
+        label.className = 'notice-label'
+        const bubble = document.createElement('div')
+        bubble.className = 'notice-bubble'
+        node.append(label, bubble)
       } else if (block.kind === 'assistant') {
         node = document.createElement('article')
         node.className = 'block'
@@ -1507,6 +1523,9 @@ function main() {
     node.toggleAttribute('data-response', block.response === true)
     if (block.kind === 'user') {
       node.querySelector('.user-bubble').textContent = block.text
+    } else if (block.kind === 'notice') {
+      node.querySelector('.notice-label').textContent = messages.noticeTitle
+      node.querySelector('.notice-bubble').textContent = block.text
     } else if (block.kind === 'reasoning') {
       const summary = reasoningSummary(block.text, block.running === true)
       node.querySelector('.think-summary-text').textContent = summary
