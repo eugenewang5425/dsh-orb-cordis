@@ -599,7 +599,7 @@ window.__ModuleLoader__.load({
 .dsh-orb-set-fields:disabled { opacity: 0.55; }
 `
 
-    const inject = ['slots']
+    const inject = ['slots', 'sessions']
 
     function apply(ctx) {
       if (!document.getElementById('dsh-orb-settings-style')) {
@@ -615,6 +615,41 @@ window.__ModuleLoader__.load({
         label: () => copy().nav,
         inject: () => ({}),
       }, OrbSettingsSection))
+      // Bookmark jump bridge: the ball arms a target on click, the main window
+      // consumes it by opening that session. The same pattern as ui-overlay-chat.
+      ctx.effect(() => {
+        let held
+        const poll = setInterval(() => { void consume() }, 2000)
+        async function consume() {
+          let target
+          try {
+            target = await request('/.dsh-orb/jump')
+          } catch {
+            return
+          }
+          const sessionId = target && typeof target.sessionId === 'string' ? target.sessionId : ''
+          if (sessionId === '') return
+          let next
+          try {
+            next = ctx.sessions.retain(sessionId, { source: 'mainView' })
+          } catch {
+            // The session may not be listed yet; the target stays armed until it expires.
+            return
+          }
+          held?.release()
+          held = next
+          try {
+            await mutate('/.dsh-orb/jump', { sessionId })
+          } catch {
+            // Consuming is best-effort: an expired target is harmless.
+          }
+        }
+        return () => {
+          clearInterval(poll)
+          held?.release()
+          held = undefined
+        }
+      }, 'dsh-orb: bookmark jump bridge')
     }
 
     exports.apply = apply

@@ -133,6 +133,50 @@ interface QuestionRequest {
   readonly signal?: AbortSignal
 }
 
+/** One background Code session as the code-agent plugin's registry reports it. */
+interface AgentBookmark {
+  readonly sessionId: string
+  readonly callerId: string
+  readonly task: string
+  readonly cwd: string
+  readonly startedAt: number
+  readonly endedAt?: number
+  readonly state: 'running' | 'completed' | 'stopped'
+  readonly outcome?: string
+}
+
+/**
+ * The code-agent plugin's `codeAgentRegistry` service, declared structurally:
+ * the two packages are separate cordis plugins and share no import.
+ */
+interface AgentBookmarkRegistry {
+  list(): readonly AgentBookmark[]
+}
+
+/** Cordis service name of {@link AgentBookmarkRegistry}. */
+const CODE_AGENT_REGISTRY = 'codeAgentRegistry'
+/** Strip poll cadence; the helper ticks elapsed clocks itself. */
+const AGENT_POLL_MS = 1_000
+/** How long a ball-initiated jump target stays valid for the main window's client plugin. */
+const JUMP_TTL_MS = 15_000
+/** Caller conversations cycle through this many attribution colors. */
+const AGENT_COLOR_COUNT = 4
+
+/** One strip entry pushed to the helper. */
+interface AgentBookmarkItem {
+  readonly sessionId: string
+  readonly callerId: string
+  readonly task: string
+  readonly cwd: string
+  readonly startedAt: number
+  readonly endedAt?: number
+  readonly state: 'running' | 'completed' | 'stopped'
+  readonly outcome?: string
+  readonly colorIndex: number
+  readonly callerTitle: string
+  readonly unread: boolean
+}
+
 interface QuestionAnswer {
   readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[]
 }
@@ -225,6 +269,13 @@ export class OrbRuntime {
   private missingLogged = false
   private timer: ReturnType<typeof setInterval> | undefined
   private giveUp: ReturnType<typeof setTimeout> | undefined
+  private agentTimer: ReturnType<typeof setInterval> | undefined
+  private lastAgentsPayload = ''
+  private readonly readAgentIds = new Set<string>()
+  private jumpTarget: { readonly sessionId: string; readonly at: number } | undefined
+  private readonly callerColors = new Map<string, number>()
+  private callerTitles: { readonly at: number; readonly byId: Map<string, string> } | undefined
+  private callerTitlesTask: Promise<void> | undefined
   private readonly dirty = new Set<string>()
   private dirtyTimer: ReturnType<typeof setTimeout> | undefined
   /** Chunk frames carry no turn/step; only the attempt's start frame does. */
@@ -388,6 +439,7 @@ export class OrbRuntime {
       return
     }
     console.error(`dsh-orb: helper socket 127.0.0.1:${this.port}`)
+    this.startAgentPoll()
     const sessionTask = this.ensureSession().catch((error: unknown) => {
       this.sessionError = error instanceof Error ? error.message : String(error)
       console.error(`dsh-orb: session setup failed: ${this.sessionError}`)
@@ -426,6 +478,7 @@ export class OrbRuntime {
     if (this.retry) clearTimeout(this.retry)
     this.retry = undefined
     this.stopWatch()
+    this.stopAgentPoll()
     this.clearDirty()
     this.handQuestionBack()
     this.server?.close()
@@ -436,6 +489,7 @@ export class OrbRuntime {
     this.chromeWindows.clear()
     this.helperPid = undefined
     this.overlayWaiters.clear()
+    this.jumpTarget = undefined
     this.selection.stop()
     this.foreground.stop()
     this.killChild()
@@ -556,6 +610,7 @@ export class OrbRuntime {
     void this.publishChrome()
     this.selection.sync()
     this.foreground.start()
+    this.pollAgents(true)
   }
 
   private async onPrompt(text: string): Promise<void> {
@@ -1383,6 +1438,10 @@ export class OrbRuntime {
       this.run('open', () => this.openSession(record.sessionId as string))
       return
     }
+    if (record.type === 'agent-open' && typeof record.sessionId === 'string') {
+      this.run('agent-open', () => this.openAgent(record.sessionId as string))
+      return
+    }
     if (record.type === 'new') {
       this.run('new', () => this.newSession())
       return
@@ -1606,6 +1665,122 @@ export class OrbRuntime {
   private async openMain(): Promise<void> {
     if (!isDesktopHost()) return
     await openMainWindow(this.ctx)
+  }
+
+  private startAgentPoll(): void {
+    if (this.agentTimer) return
+    this.agentTimer = setInterval(() => this.pollAgents(), AGENT_POLL_MS)
+  }
+
+  private stopAgentPoll(): void {
+    if (this.agentTimer) clearInterval(this.agentTimer)
+    this.agentTimer = undefined
+    this.lastAgentsPayload = ''
+  }
+
+  /**
+   * Poll the code-agent bookmark registry and push the strip on change.
+   * The registry is provided by the preset's code-agent plugin; without it
+   * (preset not mounted) the strip simply stays empty.
+   */
+  private pollAgents(force = false): void {
+    if (this.sockets.size === 0) return
+    const registry = this.agentRegistry()
+    if (registry === undefined) return
+    let items: AgentBookmarkItem[]
+    try {
+      items = this.agentItems(registry)
+    } catch (error) {
+      console.error(`dsh-orb: agent bookmarks failed: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    this.refreshCallerTitles()
+    const payload = JSON.stringify(items)
+    if (!force && payload === this.lastAgentsPayload) return
+    this.lastAgentsPayload = payload
+    this.broadcast({ type: 'agents', items })
+  }
+
+  private agentRegistry(): AgentBookmarkRegistry | undefined {
+    try {
+      const registry = this.ctx.get(CODE_AGENT_REGISTRY) as AgentBookmarkRegistry | undefined
+      return registry !== undefined && typeof registry.list === 'function' ? registry : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Running first (oldest start at the top), finished after (newest first); read ones dropped. */
+  private agentItems(registry: AgentBookmarkRegistry): AgentBookmarkItem[] {
+    const visible = registry.list().filter((bookmark) => (
+      bookmark.state === 'running' || !this.readAgentIds.has(bookmark.sessionId)
+    ))
+    visible.sort((left, right) => {
+      const leftRunning = left.state === 'running'
+      const rightRunning = right.state === 'running'
+      if (leftRunning !== rightRunning) return leftRunning ? -1 : 1
+      if (leftRunning) return left.startedAt - right.startedAt
+      return (right.endedAt ?? 0) - (left.endedAt ?? 0)
+    })
+    const titles = this.callerTitles?.byId
+    return visible.map((bookmark) => ({
+      sessionId: bookmark.sessionId,
+      callerId: bookmark.callerId,
+      task: bookmark.task,
+      cwd: bookmark.cwd,
+      startedAt: bookmark.startedAt,
+      state: bookmark.state,
+      colorIndex: this.callerColor(bookmark.callerId),
+      callerTitle: titles?.get(bookmark.callerId) ?? '',
+      unread: bookmark.state !== 'running' && !this.readAgentIds.has(bookmark.sessionId),
+      ...(bookmark.endedAt === undefined ? {} : { endedAt: bookmark.endedAt }),
+      ...(bookmark.outcome === undefined ? {} : { outcome: bookmark.outcome }),
+    }))
+  }
+
+  private callerColor(callerId: string): number {
+    let index = this.callerColors.get(callerId)
+    if (index === undefined) {
+      index = this.callerColors.size % AGENT_COLOR_COUNT
+      this.callerColors.set(callerId, index)
+    }
+    return index
+  }
+
+  /** Caller conversation titles for the tooltips, refreshed at most every 10 seconds. */
+  private refreshCallerTitles(): void {
+    if (this.callerTitles !== undefined && Date.now() - this.callerTitles.at < 10_000) return
+    this.callerTitlesTask ??= this.historyRecords().then((rows) => {
+      const byId = new Map<string, string>()
+      for (const row of rows) if (row.title !== '') byId.set(row.sessionId, row.title)
+      this.callerTitles = { at: Date.now(), byId }
+    }).catch(() => {}).finally(() => {
+      this.callerTitlesTask = undefined
+    })
+  }
+
+  /** One-shot jump target for the main window's client plugin. `null` once consumed or expired. */
+  takeJump(): { sessionId: string } | null {
+    const target = this.jumpTarget
+    if (target === undefined) return null
+    if (Date.now() - target.at > JUMP_TTL_MS) {
+      this.jumpTarget = undefined
+      return null
+    }
+    return { sessionId: target.sessionId }
+  }
+
+  confirmJump(sessionId: string): void {
+    if (this.jumpTarget?.sessionId === sessionId) this.jumpTarget = undefined
+  }
+
+  /** A bookmark click: mark read, arm the main window's jump, and focus the main window. */
+  private async openAgent(sessionId: string): Promise<void> {
+    if (!sessionId.startsWith('session-') || sessionId.length > 80) return
+    this.readAgentIds.add(sessionId)
+    this.jumpTarget = { sessionId, at: Date.now() }
+    this.pollAgents(true)
+    await this.openMain()
   }
 }
 

@@ -65,6 +65,8 @@ function boot(extra: {
   tcc?: { status(): TccStatus; open(right: TccRight): Promise<void> }
   /** Pre-seed the coordinate mode: without it the default is millifraction on Windows. */
   millifraction?: boolean
+  /** The code-agent plugin's bookmark registry, as `ctx.get('codeAgentRegistry')` returns it. */
+  agentRegistry?: unknown
 } = {}): Harness {
   const profile = mkdtempSync(join(home, 'profile-'))
   if (extra.millifraction !== undefined) {
@@ -160,6 +162,7 @@ function boot(extra: {
     effect() {},
     get(name: string) {
       if (name === 'sessions') return ctx.sessions
+      if (name === 'codeAgentRegistry') return extra.agentRegistry
       if (name === 'permissionPresets') {
         return {
           set(session: { header?: { cwd?: string } }, preset: string) {
@@ -590,6 +593,57 @@ describe('ball control socket', { concurrency: 1 }, () => {
       assert.ok(message.version > 0)
       picked.socket.destroy()
     } finally {
+      harness.runtime.halt()
+    }
+  })
+
+  it('pushes background agent bookmarks and retires one after a click', async () => {
+    const entries = [
+      {
+        sessionId: 'session-agent-done',
+        callerId: 'session-caller-a',
+        task: '写周报',
+        cwd: '/tmp/week',
+        startedAt: Date.now() - 200_000,
+        endedAt: Date.now() - 1_000,
+        state: 'completed',
+        outcome: '已完成',
+      },
+      {
+        sessionId: 'session-agent-run',
+        callerId: 'session-caller-b',
+        task: '抓天气',
+        cwd: '/tmp/weather',
+        startedAt: Date.now() - 5_000,
+        state: 'running',
+      },
+    ]
+    const harness = boot({ agentRegistry: { list: () => entries } })
+    const client = await connect(harness.runtime)
+    try {
+      await waitFor(() => client.messages.some((message) => message.type === 'agents'))
+      const first = client.messages.find((message) => message.type === 'agents') as {
+        items: { sessionId: string; state: string; unread: boolean; colorIndex: number }[]
+      }
+      assert.equal(first.items.length, 2)
+      assert.equal(first.items[0]?.sessionId, 'session-agent-run')
+      assert.equal(first.items[0]?.unread, false)
+      assert.equal(first.items[1]?.sessionId, 'session-agent-done')
+      assert.equal(first.items[1]?.unread, true)
+      assert.notEqual(first.items[0]?.colorIndex, first.items[1]?.colorIndex)
+
+      client.send({ type: 'agent-open', sessionId: 'session-agent-done' })
+      await waitFor(() => client.messages.filter((message) => message.type === 'agents').length >= 2)
+      const second = client.messages.filter((message) => message.type === 'agents').at(-1) as {
+        items: { sessionId: string }[]
+      }
+      assert.deepEqual(second.items.map((item) => item.sessionId), ['session-agent-run'])
+
+      assert.equal(harness.runtime.takeJump()?.sessionId, 'session-agent-done')
+      harness.runtime.confirmJump('session-agent-done')
+      assert.equal(harness.runtime.takeJump(), null)
+    } finally {
+      client.socket.destroy()
       harness.runtime.halt()
     }
   })

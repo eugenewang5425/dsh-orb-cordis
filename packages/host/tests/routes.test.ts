@@ -76,6 +76,8 @@ describe('settings routes', () => {
     let autoCheck = true
     const control: OrbControl = {
       helperAuthorized: (token) => tokensMatch(token, 'helper-secret'),
+      takeJump: () => null,
+      confirmJump() {},
       async publishChrome() { calls.push('chrome') },
       async setOverlayModel(selection) { store.setOverlay(selection); calls.push(['overlay', selection]) },
       async setBackgroundModel(selection) { store.setBackground(selection); calls.push(['background', selection]) },
@@ -281,6 +283,8 @@ describe('settings routes', () => {
     const calls: unknown[] = []
     const control: OrbControl = {
       helperAuthorized: () => false,
+      takeJump: () => null,
+      confirmJump() {},
       async publishChrome() {},
       async setOverlayModel() {},
       async setBackgroundModel() {},
@@ -342,6 +346,67 @@ describe('settings routes', () => {
     await handler(request('POST', '/.dsh-orb/update/auto', JSON.stringify({ enabled: 'yes' }), { 'x-dsh-user': 'ok' }), invalid)
     assert.equal(invalid.status, 400)
     assert.equal(JSON.parse(invalid.body.toString('utf8')).error, 'invalid-auto-check')
+    dispose()
+  })
+
+  it('hands a bookmark jump target to the main window once', async () => {
+    let armed: string | undefined = 'session-agent-9'
+    const control: OrbControl = {
+      helperAuthorized: () => false,
+      takeJump: () => armed === undefined ? null : { sessionId: armed },
+      confirmJump(sessionId) {
+        if (armed === sessionId) armed = undefined
+      },
+      async publishChrome() {},
+      async setOverlayModel() {},
+      async setBackgroundModel() {},
+      async setSelectionEnabled() {},
+      async setMillifractionEnabled() {},
+      async setBallEnabled() {},
+      updateState: () => ({ ...emptyUpdate }),
+      async checkUpdate() {},
+      installUpdate() {},
+      setAutoCheck() {},
+    }
+    let handler: ((req: IncomingMessage, res: ServerResponse) => Promise<void>) | undefined
+    const profile = join(root, 'profile-jump')
+    mkdirSync(profile, { recursive: true })
+    const dispose = registerOrbRoutes({
+      ctx: {
+        webServer: { register(route) { handler = route.handler; return () => { handler = undefined } } },
+        connection: {
+          admit(req) {
+            return req.headers['x-dsh-user'] === 'ok' ? { peer: { id: 'local' } } : { rejection: 401 }
+          },
+        },
+        sessionController: { modelCatalog: () => ({ groups: [] }) },
+      },
+      store: new ProfileStore(profile),
+      tcc: new TccMonitor(),
+      control,
+    })
+    assert.ok(handler)
+
+    const denied = response()
+    await handler(request('GET', '/.dsh-orb/jump'), denied)
+    assert.equal(denied.status, 401)
+
+    const armed1 = response()
+    await handler(request('GET', '/.dsh-orb/jump', undefined, { 'x-dsh-user': 'ok' }), armed1)
+    assert.equal(armed1.status, 200)
+    assert.equal((JSON.parse(armed1.body.toString('utf8')) as { sessionId: string }).sessionId, 'session-agent-9')
+
+    const confirmed = response()
+    await handler(request('POST', '/.dsh-orb/jump', JSON.stringify({ sessionId: 'session-agent-9' }), { 'x-dsh-user': 'ok' }), confirmed)
+    assert.equal(confirmed.status, 200)
+
+    const consumed = response()
+    await handler(request('GET', '/.dsh-orb/jump', undefined, { 'x-dsh-user': 'ok' }), consumed)
+    assert.equal((JSON.parse(consumed.body.toString('utf8')) as { sessionId: string | null }).sessionId, null)
+
+    const invalidPost = response()
+    await handler(request('POST', '/.dsh-orb/jump', '{}', { 'x-dsh-user': 'ok' }), invalidPost)
+    assert.equal(invalidPost.status, 400)
     dispose()
   })
 })

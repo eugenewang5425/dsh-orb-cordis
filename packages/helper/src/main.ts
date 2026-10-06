@@ -8,7 +8,7 @@ import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { readAvatarChoice, type AvatarChoice } from './avatar.ts'
 import { collectChromeWindowIds, type NativeHandleWindow } from './chrome-windows.ts'
-import { FloatingPlacement, initialWindowBounds } from './geometry.ts'
+import { AGENT_STRIP_WIDTH, FloatingPlacement, initialWindowBounds } from './geometry.ts'
 import { contextMenuTemplate } from './menu.ts'
 import { attachOverlays, denyWindowPermissions } from './overlays.ts'
 import { type MenuCatalog, type MenuSelection } from './model-menu.ts'
@@ -74,6 +74,8 @@ let placement: FloatingPlacement | undefined
 let live: Socket | undefined
 let quitting = false
 let buffer = ''
+/** Last bookmark payload, re-sent when the page reloads without a socket reconnect. */
+let lastAgentItems: unknown[] = []
 
 app.on('before-quit', () => {
   quitting = true
@@ -97,8 +99,11 @@ void app.whenReady().then(async () => {
   }, () => screen.getAllDisplays().map((display) => display.bounds))
   win.webContents.on('did-finish-load', () => {
     if (win && !win.isVisible()) win.showInactive()
-    // The page may have loaded after the last appearance change.
+    // The page may have loaded after the last appearance or bookmark change.
     pushAppearance()
+    if (win && !win.isDestroyed() && lastAgentItems.length > 0) {
+      win.webContents.send('orb:agents', lastAgentItems)
+    }
   })
   // OS scheme flips ride through while the theme preference is `system`.
   nativeTheme.on('updated', () => { pushAppearance() })
@@ -109,7 +114,7 @@ void app.whenReady().then(async () => {
 
 ipcMain.handle('orb:expand', (event, expanded) => {
   if (!fromBall(event) || !placement || typeof expanded !== 'boolean') {
-    return { expanded: false, horizontal: 'left', vertical: 'up', docked: undefined }
+    return { expanded: false, horizontal: 'left', vertical: 'up', docked: undefined, strip: 0 }
   }
   return placement.setExpanded(expanded)
 })
@@ -154,6 +159,11 @@ ipcMain.on('orb:history', (event) => {
 ipcMain.on('orb:open', (event, sessionId) => {
   if (!fromBall(event)) return
   if (typeof sessionId === 'string') write({ type: 'open', sessionId })
+})
+
+ipcMain.on('orb:agent-open', (event, sessionId) => {
+  if (!fromBall(event)) return
+  if (typeof sessionId === 'string') write({ type: 'agent-open', sessionId })
 })
 
 ipcMain.on('orb:new', (event) => {
@@ -363,6 +373,13 @@ function deliver(message: unknown): void {
     win.webContents.send('orb:history', (record as { items?: unknown }).items)
     return
   }
+  if (record.type === 'agents') {
+    const items = (record as { items?: unknown }).items
+    lastAgentItems = Array.isArray(items) ? items : []
+    win.webContents.send('orb:agents', lastAgentItems)
+    applyStrip(lastAgentItems.length > 0)
+    return
+  }
   if (record.type === 'reset') {
     win.webContents.send('orb:reset')
     return
@@ -392,6 +409,17 @@ function deliver(message: unknown): void {
 /** Ball plus overlays: the windows the host must skip when it picks an observation window. */
 function chromeWindowIds(): number[] {
   return collectChromeWindowIds([win, ...(overlays?.chromeWindows() ?? [])], process.platform)
+}
+
+/**
+ * The bookmark strip lives beside the panel inside one transparent window, so
+ * the window widens while bookmarks exist and shrinks back when they clear.
+ * The renderer learns the applied geometry through `orb:expand-state`.
+ */
+function applyStrip(present: boolean): void {
+  if (!placement) return
+  const state = placement.setStrip(present ? AGENT_STRIP_WIDTH : 0)
+  if (win && !win.isDestroyed()) win.webContents.send('orb:expand-state', state)
 }
 
 function fromBall(event: unknown): boolean {

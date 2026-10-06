@@ -196,6 +196,7 @@ function createFakeAgent(id: SessionId, options: {
           }
           return () => {
             statusListeners.delete(wrapped)
+            statusSubscriptions -= 1
           }
         }
         if (event === 'agent/disposed') {
@@ -911,6 +912,8 @@ describe('code_agent plugin', () => {
     const aborted = await setup({ live: new Map([[CALLER, abortedCaller], [STANDARD, abortedCode]]) })
     const cancelled = await execute(aborted.ctx, { task: 'Write a Word document' })
     expect(cancelled.isError).toBe(false)
+    // Nobody owns a listener: the watch was never owned, and the registry
+    // detached again because the aborted watch marks the bookmark stopped.
     expect(abortedCode.statusSubscriptions).toBe(0)
     abortedCode.setRunning()
     abortedCode.resolveIdle()

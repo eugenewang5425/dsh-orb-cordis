@@ -123,7 +123,8 @@ function intervalHasStarted(code: Agent, requestId: SessionRequestId): boolean {
   return code.status === 'running' || !holdsPrompt(code, requestId)
 }
 
-function holdsPrompt(code: Agent, requestId: SessionRequestId): boolean {
+/** Whether the accepted prompt is still parked in the inbox (queued, not started or finished). */
+export function holdsPrompt(code: Agent, requestId: SessionRequestId): boolean {
   return messageHasRpc(code.inbox.nextTurn, requestId) || messageHasRpc(code.inbox.nextStep, requestId)
 }
 
@@ -176,7 +177,8 @@ async function raceAbort(signal: AbortSignal, work: Promise<void>): Promise<'abo
   }
 }
 
-function lastAssistantText(code: Agent): string | undefined {
+/** Newest non-empty assistant text of the session, or undefined when none exists. */
+export function lastAssistantText(code: Agent): string | undefined {
   const messages = code.session.deriveMessages()
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]

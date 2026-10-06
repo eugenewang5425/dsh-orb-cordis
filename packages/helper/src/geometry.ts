@@ -11,6 +11,12 @@ export const PANEL_WINDOW_SIZE = {
   width: PANEL_SIZE.width + 2 * CHROME_INSET,
   height: PANEL_SIZE.height + 2 * CHROME_INSET,
 } as const
+/**
+ * Transparent reserve on the panel's far edge for the bookmark strip.
+ * Sized for the fully hover-expanded chip row; collapsed chips sit at the
+ * panel-side edge inside it.
+ */
+export const AGENT_STRIP_WIDTH = 208
 export const BELOW_CENTER = 0.08
 export const DOCK_OVERLAP = Math.round(BALL_SIZE / 5)
 export const DOCK_DRAG_OFF = Math.round(BALL_SIZE / 3)
@@ -40,6 +46,8 @@ export interface ExpandState {
   readonly horizontal: HorizontalExpand
   readonly vertical: VerticalExpand
   readonly docked: DockSide | undefined
+  /** Reserved bookmark-strip width on the far edge; 0 when there is nothing to show. */
+  readonly strip: number
 }
 
 export interface DockState {
@@ -165,22 +173,32 @@ export function defaultFloatingBallOrigin(workArea: Rect): { x: number; y: numbe
   return clampedBallOrigin({ x: Math.round(x), y: Math.round(y) }, workArea)
 }
 
-function overlayBoundsFromBall(ball: { readonly x: number; readonly y: number }, direction: Direction): Rect {
+function overlayBoundsFromBall(
+  ball: { readonly x: number; readonly y: number },
+  direction: Direction,
+  stripWidth = 0,
+): Rect {
   return {
+    // The strip widens the far edge only; the ball-anchored near edge is untouched,
+    // so ballOriginFromWindow needs no strip awareness.
     x: direction.horizontal === 'left'
-      ? ball.x - (PANEL_SIZE.width - BALL_SIZE) - CHROME_INSET
+      ? ball.x - (PANEL_SIZE.width - BALL_SIZE) - CHROME_INSET - stripWidth
       : ball.x - CHROME_INSET,
     y: direction.vertical === 'up'
       ? ball.y - (PANEL_SIZE.height - BALL_SIZE) - CHROME_INSET
       : ball.y - CHROME_INSET,
-    width: PANEL_WINDOW_SIZE.width,
+    width: PANEL_WINDOW_SIZE.width + stripWidth,
     height: PANEL_WINDOW_SIZE.height,
   }
 }
 
-function expandedOverlayBounds(ball: { readonly x: number; readonly y: number }, workArea: Rect): Rect & Direction {
+function expandedOverlayBounds(
+  ball: { readonly x: number; readonly y: number },
+  workArea: Rect,
+  stripWidth = 0,
+): Rect & Direction {
   const direction = expandDirection(ball, workArea)
-  const unclamped = overlayBoundsFromBall(ball, direction)
+  const unclamped = overlayBoundsFromBall(ball, direction, stripWidth)
   return {
     x: clampWindowOrigin(unclamped.x, workArea.x, workArea.width, unclamped.width),
     y: clampWindowOrigin(unclamped.y, workArea.y, workArea.height, unclamped.height),
@@ -255,6 +273,7 @@ export function initialWindowBounds(workArea: Rect): Rect {
 export class FloatingPlacement {
   private direction: Direction = { horizontal: 'left', vertical: 'up' }
   private docked: { side: DockSide; y: number } | undefined
+  private stripWidth = 0
   private anim = 0
 
   constructor(private readonly window: {
@@ -269,18 +288,40 @@ export class FloatingPlacement {
     if (expanded) {
       const origin = this.currentBallOrigin(display.workArea)
       this.docked = undefined
-      const next = expandedOverlayBounds(origin, display.workArea)
+      const next = expandedOverlayBounds(origin, display.workArea, this.stripWidth)
       this.direction = { horizontal: next.horizontal, vertical: next.vertical }
       this.window.setBounds({ x: next.x, y: next.y, width: next.width, height: next.height })
-      return { expanded: true, ...this.direction, docked: undefined }
+      return { expanded: true, ...this.direction, docked: undefined, strip: this.stripWidth }
     }
     if (this.docked) {
       this.applyTab(this.docked.side, this.docked.y, display.bounds)
-      return { expanded: false, ...this.direction, docked: this.docked.side }
+      return { expanded: false, ...this.direction, docked: this.docked.side, strip: this.stripWidth }
     }
     const origin = clampedBallOrigin(this.currentBallOrigin(display.workArea), display.workArea)
     this.window.setBounds(collapsedWindowBounds(origin))
-    return { expanded: false, ...this.direction, docked: undefined }
+    return { expanded: false, ...this.direction, docked: undefined, strip: this.stripWidth }
+  }
+
+  /**
+   * Reserve (or free) bookmark-strip width on the far edge. While expanded the
+   * window re-bounds immediately around the fixed ball origin; while collapsed
+   * the value is stored for the next expand.
+   */
+  setStrip(width: number): ExpandState {
+    const next = Math.max(0, Math.round(width))
+    if (next === this.stripWidth) {
+      return { expanded: !isCollapsed(this.window.getBounds()) && !this.docked, ...this.direction, docked: this.docked?.side, strip: this.stripWidth }
+    }
+    this.stripWidth = next
+    const bounds = this.window.getBounds()
+    if (!isCollapsed(bounds) && !this.docked) {
+      const display = this.displayAt(center(bounds))
+      const origin = this.currentBallOrigin(display.workArea)
+      const nextBounds = expandedOverlayBounds(origin, display.workArea, this.stripWidth)
+      this.direction = { horizontal: nextBounds.horizontal, vertical: nextBounds.vertical }
+      this.window.setBounds({ x: nextBounds.x, y: nextBounds.y, width: nextBounds.width, height: nextBounds.height })
+    }
+    return { expanded: !isCollapsed(this.window.getBounds()) && !this.docked, ...this.direction, docked: this.docked?.side, strip: this.stripWidth }
   }
 
   /**
@@ -292,7 +333,7 @@ export class FloatingPlacement {
     const bounds = this.window.getBounds()
     if (!isCollapsed(bounds) && this.docked === undefined) {
       const direction = this.direction
-      this.window.setBounds(overlayBoundsFromBall(origin, direction))
+      this.window.setBounds(overlayBoundsFromBall(origin, direction, this.stripWidth))
       return { docked: undefined }
     }
     if (!canDock) {

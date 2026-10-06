@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld('dshOrb', {
   openSession(id) {
     ipcRenderer.send('orb:open', id)
   },
+  openAgent(id) {
+    ipcRenderer.send('orb:agent-open', id)
+  },
   newSession() {
     ipcRenderer.send('orb:new')
   },
@@ -78,6 +81,12 @@ contextBridge.exposeInMainWorld('dshOrb', {
   },
   onHistory(callback) {
     ipcRenderer.on('orb:history', (_event, items) => callback(items))
+  },
+  onAgents(callback) {
+    ipcRenderer.on('orb:agents', (_event, items) => callback(items))
+  },
+  onExpandState(callback) {
+    ipcRenderer.on('orb:expand-state', (_event, state) => callback(state))
   },
   onPermission(callback) {
     ipcRenderer.on('orb:permission', (_event, preset) => callback(preset))

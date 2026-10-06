@@ -146,6 +146,7 @@ function loadSection() {
       inject(_name, register) { register() },
       register(spec, Component) { registered = { spec, Component } },
     },
+    effect(run) { return run() },
   }
   plugin.apply(ctx)
 
@@ -346,7 +347,9 @@ describe('settings section', () => {
     view = page.render()
     assert.match(texts(), /正在更新到 0\.2\.0…/)
     const before = page.calls.length
-    assert.equal(await page.tick(), 1, 'the page polls while the install runs')
+    // The settings poll runs alongside the bookmark jump bridge's poll, so the
+    // interval count is only "at least the install poll".
+    assert.ok(await page.tick() >= 1, 'the page polls while the install runs')
     assert.equal(page.calls.slice(before).some((call) => call.path === '/.dsh-orb/update'), true)
 
     // A blocked install offers the approval retry with the pending package names.
