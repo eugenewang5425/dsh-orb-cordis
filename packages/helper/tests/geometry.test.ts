@@ -28,6 +28,47 @@ describe('docking on more than one display', () => {
   })
 })
 
+describe('edge-contact docking', () => {
+  it('docks when the ball merely touches the right edge on release', async () => {
+    const displays = [pair(0, 0, 1440, 900)]
+    const placed = placement(displays, 1368, 400)
+    placed.move(1368, 400)
+    const state = await placed.clamp()
+    assert.equal(state.docked, 'right')
+    const bounds = lastBounds.get(placed)
+    assert.ok(bounds)
+    assert.equal(bounds.x + bounds.width, 1440)
+  })
+
+  it('keeps a free ball flush inside the edge when it stops short', async () => {
+    const displays = [pair(0, 0, 1440, 900)]
+    const placed = placement(displays, 1367, 400)
+    placed.move(1367, 400)
+    const state = await placed.clamp()
+    assert.equal(state.docked, undefined)
+    assert.equal(lastBounds.get(placed)?.x, 1367 - CHROME_INSET)
+  })
+
+  it('docks from the renderer origin when the window bounds stay inside (DPI drift)', async () => {
+    const displays = [pair(0, 0, 1440, 900)]
+    const placed = placement(displays, 1350, 400)
+    placed.move(1350, 400)
+    const state = await placed.clamp(true, { x: 1380, y: 410 })
+    assert.equal(state.docked, 'right')
+    const bounds = lastBounds.get(placed)
+    assert.ok(bounds)
+    assert.equal(bounds.x + bounds.width, 1440)
+  })
+
+  it('docks on the left edge from the renderer origin alone', async () => {
+    const displays = [pair(0, 0, 1440, 900)]
+    const placed = placement(displays, 30, 400)
+    placed.move(30, 400)
+    const state = await placed.clamp(true, { x: 0, y: 420 })
+    assert.equal(state.docked, 'left')
+  })
+})
+
 describe('bookmark strip geometry', () => {
   it('widens the expanded window on the far edge and keeps the ball origin', () => {
     const displays = [pair(0, 0, 1920, 1080)]

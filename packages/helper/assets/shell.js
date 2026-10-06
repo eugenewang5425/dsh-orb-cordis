@@ -509,8 +509,8 @@ function main() {
     applyDockedFrom(await api.move(x, y, !(running || asking())))
   }
 
-  async function clampBall() {
-    applyDockedFrom(await api.clamp(!(running || asking())))
+  async function clampBall(origin) {
+    applyDockedFrom(await api.clamp(!(running || asking()), origin))
   }
 
   async function unsnapDocked() {
@@ -2015,7 +2015,7 @@ function main() {
       skipDockCommit = false
       if (!skipDock) {
         if (origin !== undefined) await moveBall(origin.x, origin.y)
-        await clampBall()
+        await clampBall(origin)
       }
       return true
     }

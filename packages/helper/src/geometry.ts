@@ -18,7 +18,10 @@ export const PANEL_WINDOW_SIZE = {
  */
 export const AGENT_STRIP_WIDTH = 208
 export const BELOW_CENTER = 0.08
-export const DOCK_OVERLAP = Math.round(BALL_SIZE / 5)
+/** Any contact with the display edge docks on release. A deep-overlap bar misses
+ * grabs near the trailing rim (the cursor stops at the edge) and machines whose
+ * window bounds drift a few pixels (Windows per-display DPI). */
+export const DOCK_OVERLAP = 0
 export const DOCK_DRAG_OFF = Math.round(BALL_SIZE / 3)
 export const DOCK_TAB_WIDTH = 6
 export const DOCK_GLOW = 8
@@ -86,7 +89,7 @@ function clampWindowOrigin(value: number, workOrigin: number, workSize: number, 
 }
 
 /**
- * Which outer display edge the ball already overlaps by about one fifth of its width.
+ * Which outer display edge the ball reaches on release; any contact docks.
  * An edge that touches another display is a seam, not a place to dock.
  */
 export function dockSideForBallOrigin(
@@ -210,6 +213,14 @@ function expandedOverlayBounds(
 
 function clampBallY(ballY: number, bounds: Rect): number {
   return clamp(Math.round(ballY), bounds.y, bounds.y + bounds.height - BALL_SIZE)
+}
+
+/** Renderer-supplied drag origin, rounded and bounds-checked like `isMove` inputs. */
+function inputBallOrigin(origin?: { x: number; y: number }): { x: number; y: number } | undefined {
+  if (origin === undefined) return undefined
+  if (!Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return undefined
+  if (Math.abs(origin.x) > 100_000 || Math.abs(origin.y) > 100_000) return undefined
+  return { x: Math.round(origin.x), y: Math.round(origin.y) }
 }
 
 function offScreenBallOrigin(side: DockSide, ballY: number, bounds: Rect): { x: number; y: number } {
@@ -353,8 +364,13 @@ export class FloatingPlacement {
     return { docked: undefined }
   }
 
-  /** Pull a free ball inside the work area, or dock it when it already overlaps a side edge. */
-  async clamp(canDock = true): Promise<DockState> {
+  /**
+   * Pull a free ball inside the work area, or dock it when it reaches a side edge.
+   * `remoteOrigin` is the renderer's input-side ball origin (drag coordinates).
+   * On Windows the window bounds can come back mis-scaled (per-display DPI,
+   * electron#10862), so either signal docking is enough.
+   */
+  async clamp(canDock = true, remoteOrigin?: { x: number; y: number }): Promise<DockState> {
     const bounds = this.window.getBounds()
     const display = this.displayAt(center(bounds))
     if (this.docked) {
@@ -366,6 +382,12 @@ export class FloatingPlacement {
       if (canDock) {
         const side = dockSideForBallOrigin(origin, display.bounds, this.displayBounds())
         if (side) return this.snap(side, origin.y, display.bounds)
+        const remote = inputBallOrigin(remoteOrigin)
+        if (remote) {
+          const remoteDisplay = this.displayAt(remote)
+          const remoteSide = dockSideForBallOrigin(remote, remoteDisplay.bounds, this.displayBounds())
+          if (remoteSide) return this.snap(remoteSide, remote.y, remoteDisplay.bounds)
+        }
       }
       this.window.setBounds(collapsedWindowBounds(clampedBallOrigin(origin, display.workArea)))
       return { docked: undefined }

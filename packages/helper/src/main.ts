@@ -124,9 +124,12 @@ ipcMain.handle('orb:move', (event, request) => {
   return placement.move(request.x, request.y, request.canDock)
 })
 
-ipcMain.handle('orb:clamp', async (event, canDock) => {
+ipcMain.handle('orb:clamp', async (event, payload) => {
   if (!fromBall(event) || !placement) return { docked: undefined }
-  return placement.clamp(canDock !== false)
+  const request = readClampRequest(payload)
+  const result = await placement.clamp(request.canDock, request.origin)
+  logOrbGeometry(result, request.origin)
+  return result
 })
 
 ipcMain.handle('orb:unsnap', async (event) => {
@@ -462,6 +465,45 @@ function isMove(value: unknown): value is { x: number; y: number; canDock: boole
     && Number.isFinite(point.x) && Number.isFinite(point.y)
     && Math.abs(point.x) <= 100_000 && Math.abs(point.y) <= 100_000
     && typeof point.canDock === 'boolean'
+}
+
+/** Accepts the legacy bare `canDock` boolean and the `{ canDock, origin }` payload. */
+function readClampRequest(value: unknown): { canDock: boolean; origin?: { x: number; y: number } } {
+  if (typeof value === 'boolean') return { canDock: value }
+  if (typeof value !== 'object' || value === null) return { canDock: true }
+  const record = value as { canDock?: unknown; origin?: unknown }
+  const canDock = record.canDock !== false
+  const origin = isPoint(record.origin) ? { x: record.origin.x, y: record.origin.y } : undefined
+  return { canDock, origin }
+}
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  if (typeof value !== 'object' || value === null) return false
+  const point = value as { x?: unknown; y?: unknown }
+  return typeof point.x === 'number' && typeof point.y === 'number'
+    && Number.isFinite(point.x) && Number.isFinite(point.y)
+    && Math.abs(point.x) <= 100_000 && Math.abs(point.y) <= 100_000
+}
+
+/**
+ * One stderr line per drag release. Comparing `window` (setBounds/getBounds path)
+ * against `remote` (renderer drag coordinates) and each display's scaleFactor
+ * localizes Windows machines whose dock decision fails on per-display DPI drift.
+ */
+function logOrbGeometry(result: { docked?: 'left' | 'right' }, remoteOrigin?: { x: number; y: number }): void {
+  if (!win || win.isDestroyed()) return
+  const displays = screen.getAllDisplays().map((display) => ({
+    bounds: display.bounds,
+    workArea: display.workArea,
+    scaleFactor: display.scaleFactor,
+  }))
+  console.error(`[orb-geom] ${JSON.stringify({
+    electron: process.versions.electron,
+    window: win.getBounds(),
+    remote: remoteOrigin ?? null,
+    displays,
+    docked: result.docked ?? null,
+  })}`)
 }
 
 function zhLocale(): boolean {

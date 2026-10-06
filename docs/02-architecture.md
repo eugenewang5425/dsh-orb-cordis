@@ -213,6 +213,8 @@ interface OverlaySpec {
 }
 ```
 
+悬浮球吸边:拖动松手时球一接触屏幕左右边缘即停靠。停靠判定同时采信两路球原点——主进程窗口 bounds 派生的位置与渲染端拖动坐标(`orb:clamp` 的 `origin` 字段),任一触边即吸,以规避 Windows 每显示器 DPI 下窗口 bounds 与输入坐标不一致的问题(electron#10862);每次松手 helper 会向 stderr 输出一行 `[orb-geom]` 诊断日志,记录窗口 bounds、两路原点与各显示器 scaleFactor。
+
 划词监控不进这个接口。它在 Host 里跑，把「选中的文字 + 屏幕坐标」发给 helper。
 
 ## 9. 打开主窗口
