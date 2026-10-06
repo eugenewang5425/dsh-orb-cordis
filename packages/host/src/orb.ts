@@ -36,6 +36,7 @@ import {
 import { pinSessionId } from './services.ts'
 import { selectModelKeepDefault } from './select-model.ts'
 import { createForegroundMemory } from './windows-foreground.ts'
+import { EMPTY_UPDATE_STATE, type UpdateChecker, type UpdateState } from './update.ts'
 
 /** Host services the plugin injects. Shapes match the official 0.1.7-rc.2 controllers. */
 export interface OrbContext {
@@ -134,6 +135,50 @@ interface QuestionRequest {
   readonly signal?: AbortSignal
 }
 
+/** One background Code session as the code-agent plugin's registry reports it. */
+interface AgentBookmark {
+  readonly sessionId: string
+  readonly callerId: string
+  readonly task: string
+  readonly cwd: string
+  readonly startedAt: number
+  readonly endedAt?: number
+  readonly state: 'running' | 'completed' | 'stopped'
+  readonly outcome?: string
+}
+
+/**
+ * The code-agent plugin's `codeAgentRegistry` service, declared structurally:
+ * the two packages are separate cordis plugins and share no import.
+ */
+interface AgentBookmarkRegistry {
+  list(): readonly AgentBookmark[]
+}
+
+/** Cordis service name of {@link AgentBookmarkRegistry}. */
+const CODE_AGENT_REGISTRY = 'codeAgentRegistry'
+/** Strip poll cadence; the helper ticks elapsed clocks itself. */
+const AGENT_POLL_MS = 1_000
+/** How long a ball-initiated jump target stays valid: long enough for a cold app launch. */
+const JUMP_TTL_MS = 30_000
+/** Caller conversations cycle through this many attribution colors. */
+const AGENT_COLOR_COUNT = 4
+
+/** One strip entry pushed to the helper. */
+interface AgentBookmarkItem {
+  readonly sessionId: string
+  readonly callerId: string
+  readonly task: string
+  readonly cwd: string
+  readonly startedAt: number
+  readonly endedAt?: number
+  readonly state: 'running' | 'completed' | 'stopped'
+  readonly outcome?: string
+  readonly colorIndex: number
+  readonly callerTitle: string
+  readonly unread: boolean
+}
+
 interface QuestionAnswer {
   readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[]
 }
@@ -164,7 +209,7 @@ interface BlockUsage {
 interface BlockMessage {
   readonly type: 'block'
   readonly key: string
-  readonly kind: 'user' | 'reasoning' | 'assistant' | 'tool'
+  readonly kind: 'user' | 'reasoning' | 'assistant' | 'tool' | 'notice'
   readonly text: string
   readonly running: boolean
   readonly interrupted?: true
@@ -216,6 +261,8 @@ export class OrbRuntime {
   private pendingStart = false
   private helperError: string | undefined
   private userData = ''
+  /** Newer version waiting to be installed, or null once none is known. */
+  private updateAvailable: string | null = null
   private idleWarned = false
   private sessionId: string | undefined
   private sessionError: string | undefined
@@ -224,6 +271,13 @@ export class OrbRuntime {
   private missingLogged = false
   private timer: ReturnType<typeof setInterval> | undefined
   private giveUp: ReturnType<typeof setTimeout> | undefined
+  private agentTimer: ReturnType<typeof setInterval> | undefined
+  private lastAgentsPayload = ''
+  private readonly readAgentIds = new Set<string>()
+  private jumpTarget: { readonly sessionId: string; readonly at: number } | undefined
+  private readonly callerColors = new Map<string, number>()
+  private callerTitles: { readonly at: number; readonly byId: Map<string, string> } | undefined
+  private callerTitlesTask: Promise<void> | undefined
   private readonly dirty = new Set<string>()
   private dirtyTimer: ReturnType<typeof setTimeout> | undefined
   /** Chunk frames carry no turn/step; only the attempt's start frame does. */
@@ -237,6 +291,8 @@ export class OrbRuntime {
   private responseKeys: string[] = []
   private helperPid: number | undefined
   private appearance: Appearance = {}
+  /** Set by the plugin entry; the settings routes and the ball menu both drive it. */
+  private updater: UpdateChecker | undefined
   private readonly overlayWaiters = new Map<string, () => void>()
   /** Chrome window ids each helper reported, keyed by its socket. */
   private readonly chromeWindows = new Map<Socket, readonly number[]>()
@@ -385,6 +441,7 @@ export class OrbRuntime {
       return
     }
     console.error(`dsh-orb: helper socket 127.0.0.1:${this.port}`)
+    this.startPolls()
     const sessionTask = this.ensureSession().catch((error: unknown) => {
       this.sessionError = error instanceof Error ? error.message : String(error)
       console.error(`dsh-orb: session setup failed: ${this.sessionError}`)
@@ -412,6 +469,7 @@ export class OrbRuntime {
    */
   async bind(): Promise<{ port: number; token: string }> {
     if (!this.server) await this.listen()
+    this.startPolls()
     return { port: this.port, token: this.token }
   }
 
@@ -423,6 +481,7 @@ export class OrbRuntime {
     if (this.retry) clearTimeout(this.retry)
     this.retry = undefined
     this.stopWatch()
+    this.stopAgentPoll()
     this.clearDirty()
     this.handQuestionBack()
     this.server?.close()
@@ -433,6 +492,7 @@ export class OrbRuntime {
     this.chromeWindows.clear()
     this.helperPid = undefined
     this.overlayWaiters.clear()
+    this.jumpTarget = undefined
     this.selection.stop()
     this.foreground.stop()
     this.killChild()
@@ -554,6 +614,7 @@ export class OrbRuntime {
     void this.publishChrome()
     this.selection.sync()
     this.foreground.start()
+    this.pollAgents(true)
   }
 
   private async onPrompt(text: string): Promise<void> {
@@ -730,10 +791,32 @@ export class OrbRuntime {
 
   private consume(type: string, data: unknown, seq: number): void {
     if (type === 'user/message') {
-      if (!this.replaying) return
-      const text = userText(data)
-      if (!text.trim()) return
-      this.block(`user:${seq}`, 'user', text, false, 'set')
+      const record = asRecord(data)
+      const sourceKind = asRecord(record?.source)?.kind
+      if (sourceKind === 'user' || sourceKind === undefined) {
+        if (!this.replaying) return
+        const text = userText(data)
+        if (!text.trim()) return
+        this.block(`user:${seq}`, 'user', text, false, 'set')
+        return
+      }
+      // The code_agent completion report is the only notice the ball shows as
+      // a card: pre-step context injections (frontmost window, etc.) share the
+      // source shape and stay invisible.
+      const text = stripNoticeGuards(textOf(record?.content))
+      if (!isCompletionNotice(text)) return
+      this.block(`notice:${seq}`, 'notice', text, false, 'set')
+      return
+    }
+    if (type === 'turn/start') {
+      // A wake turn (e.g. the code_agent completion followup) starts without a
+      // ball prompt; the ball still shows it as running, stop button included.
+      if (this.turnRunning) return
+      this.turnRunning = true
+      this.turnInterrupted = false
+      this.selection.setSessionRunning(true)
+      this.broadcast({ type: 'turn', running: true })
+      this.armIdle()
       return
     }
     if (type === 'assistant/chunk') {
@@ -949,7 +1032,12 @@ export class OrbRuntime {
     this.responseKeys = []
     this.broadcast({ type: 'turn', running: false, ...(this.turnInterrupted ? { interrupted: true } : {}) })
     this.turnInterrupted = false
-    this.stopWatch()
+    // The transcript poll keeps running: a completion notice can wake this
+    // session into a new turn at any time, without a ball prompt.
+    if (this.giveUp !== undefined) {
+      clearTimeout(this.giveUp)
+      this.giveUp = undefined
+    }
     const reply = [...this.blockOrder].reverse().map((key) => this.blocks.get(key)).find((item) => item?.kind === 'assistant')
     console.error(`dsh-orb: turn done reply=${reply?.text.length ?? 0}`)
   }
@@ -1244,9 +1332,21 @@ export class OrbRuntime {
       background: models.background,
       millifractionEnabled: this.store.millifractionEnabled(),
       openMain: isDesktopHost(),
+      update: this.updateAvailable,
       catalog,
     })
     this.broadcast(avatarMessage(this.store))
+  }
+
+  /**
+   * Remember the version the check found and tell the ball.
+   * The menu row and the status line both come from this; the settings page reads the checker.
+   */
+  setUpdateAvailable(version: string | null): void {
+    if (this.updateAvailable === version) return
+    this.updateAvailable = version
+    if (version !== null) this.broadcast({ type: 'update', state: 'available', version })
+    void this.publishChrome()
   }
 
   /**
@@ -1306,6 +1406,52 @@ export class OrbRuntime {
     this.broadcast({ type: 'hotkey', enabled, accelerator })
   }
 
+  /** Take the checker the plugin entry owns. Without one the settings page hides its update card. */
+  useUpdater(updater: UpdateChecker): void {
+    this.updater = updater
+    this.setUpdateAvailable(updater.availableVersion())
+  }
+
+  updateState(): UpdateState {
+    return this.updater?.state() ?? EMPTY_UPDATE_STATE
+  }
+
+  async checkUpdate(): Promise<void> {
+    await this.updater?.check(true)
+    this.setUpdateAvailable(this.updater?.availableVersion() ?? null)
+  }
+
+  /**
+   * Start the upgrade and return at once; the settings page polls {@link updateState}.
+   * The ball hears the outcome through the same status line every other action uses.
+   */
+  installUpdate(approvedBuilds?: string[]): void {
+    const updater = this.updater
+    if (updater === undefined) return
+    const version = updater.availableVersion()
+    if (version === null) return
+    this.run('update', async () => {
+      this.broadcast({ type: 'update', state: 'starting', version })
+      await updater.install(approvedBuilds)
+      const state = updater.state()
+      this.setUpdateAvailable(updater.availableVersion())
+      if (state.error !== null) {
+        this.broadcast({
+          type: 'update',
+          state: 'failed',
+          version,
+          reason: state.pendingBuilds.length > 0 ? 'build-blocked' : state.error,
+        })
+        return
+      }
+      this.broadcast({ type: 'update', state: 'done', version, restart: state.restartRequired })
+    })
+  }
+
+  setAutoCheck(enabled: boolean): void {
+    this.updater?.setAutoCheck(enabled)
+  }
+
   private onControl(message: unknown, socket: Socket): void {
     const record = asRecord(message)
     if (!record || typeof record.type !== 'string') return
@@ -1328,6 +1474,10 @@ export class OrbRuntime {
     }
     if (record.type === 'open' && typeof record.sessionId === 'string') {
       this.run('open', () => this.openSession(record.sessionId as string))
+      return
+    }
+    if (record.type === 'agent-open' && typeof record.sessionId === 'string') {
+      this.run('agent-open', () => this.openAgent(record.sessionId as string))
       return
     }
     if (record.type === 'new') {
@@ -1366,6 +1516,10 @@ export class OrbRuntime {
     }
     if (record.type === 'disable') {
       this.run('disable', () => this.setBallEnabled(false))
+      return
+    }
+    if (record.type === 'update') {
+      this.installUpdate()
       return
     }
     if (record.type === 'open-main') {
@@ -1492,7 +1646,7 @@ export class OrbRuntime {
     this.responseKeys = []
     this.clearDirty()
     this.selection.setSessionRunning(false)
-    this.stopWatch()
+    // The transcript poll outlives a session switch: keep it running.
     this.broadcast({ type: 'reset' })
     this.broadcast({ type: 'turn', running: false })
   }
@@ -1549,6 +1703,132 @@ export class OrbRuntime {
   private async openMain(): Promise<void> {
     if (!isDesktopHost()) return
     await openMainWindow(this.ctx)
+  }
+
+  private startAgentPoll(): void {
+    if (this.agentTimer) return
+    this.agentTimer = setInterval(() => this.pollAgents(), AGENT_POLL_MS)
+  }
+
+  /**
+   * The always-on polls: the bookmark registry, and the transcript drain. The
+   * latter runs for the whole helper lifetime, not just during ball-initiated
+   * turns — completion notices can wake the session into a new turn at any time.
+   */
+  private startPolls(): void {
+    this.startAgentPoll()
+    this.watch()
+  }
+
+  private stopAgentPoll(): void {
+    if (this.agentTimer) clearInterval(this.agentTimer)
+    this.agentTimer = undefined
+    this.lastAgentsPayload = ''
+  }
+
+  /**
+   * Poll the code-agent bookmark registry and push the strip on change.
+   * The registry is provided by the preset's code-agent plugin; without it
+   * (preset not mounted) the strip simply stays empty.
+   */
+  private pollAgents(force = false): void {
+    if (this.sockets.size === 0) return
+    const registry = this.agentRegistry()
+    if (registry === undefined) return
+    let items: AgentBookmarkItem[]
+    try {
+      items = this.agentItems(registry)
+    } catch (error) {
+      console.error(`dsh-orb: agent bookmarks failed: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    this.refreshCallerTitles()
+    const payload = JSON.stringify(items)
+    if (!force && payload === this.lastAgentsPayload) return
+    this.lastAgentsPayload = payload
+    this.broadcast({ type: 'agents', items })
+  }
+
+  private agentRegistry(): AgentBookmarkRegistry | undefined {
+    try {
+      const registry = this.ctx.get(CODE_AGENT_REGISTRY) as AgentBookmarkRegistry | undefined
+      return registry !== undefined && typeof registry.list === 'function' ? registry : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Running first (oldest start at the top), finished after (newest first); read ones dropped. */
+  private agentItems(registry: AgentBookmarkRegistry): AgentBookmarkItem[] {
+    const visible = registry.list().filter((bookmark) => (
+      bookmark.state === 'running' || !this.readAgentIds.has(bookmark.sessionId)
+    ))
+    visible.sort((left, right) => {
+      const leftRunning = left.state === 'running'
+      const rightRunning = right.state === 'running'
+      if (leftRunning !== rightRunning) return leftRunning ? -1 : 1
+      if (leftRunning) return left.startedAt - right.startedAt
+      return (right.endedAt ?? 0) - (left.endedAt ?? 0)
+    })
+    const titles = this.callerTitles?.byId
+    return visible.map((bookmark) => ({
+      sessionId: bookmark.sessionId,
+      callerId: bookmark.callerId,
+      task: bookmark.task,
+      cwd: bookmark.cwd,
+      startedAt: bookmark.startedAt,
+      state: bookmark.state,
+      colorIndex: this.callerColor(bookmark.callerId),
+      callerTitle: titles?.get(bookmark.callerId) ?? '',
+      unread: bookmark.state !== 'running' && !this.readAgentIds.has(bookmark.sessionId),
+      ...(bookmark.endedAt === undefined ? {} : { endedAt: bookmark.endedAt }),
+      ...(bookmark.outcome === undefined ? {} : { outcome: bookmark.outcome }),
+    }))
+  }
+
+  private callerColor(callerId: string): number {
+    let index = this.callerColors.get(callerId)
+    if (index === undefined) {
+      index = this.callerColors.size % AGENT_COLOR_COUNT
+      this.callerColors.set(callerId, index)
+    }
+    return index
+  }
+
+  /** Caller conversation titles for the tooltips, refreshed at most every 10 seconds. */
+  private refreshCallerTitles(): void {
+    if (this.callerTitles !== undefined && Date.now() - this.callerTitles.at < 10_000) return
+    this.callerTitlesTask ??= this.historyRecords().then((rows) => {
+      const byId = new Map<string, string>()
+      for (const row of rows) if (row.title !== '') byId.set(row.sessionId, row.title)
+      this.callerTitles = { at: Date.now(), byId }
+    }).catch(() => {}).finally(() => {
+      this.callerTitlesTask = undefined
+    })
+  }
+
+  /** One-shot jump target for the main window's client plugin. `null` once consumed or expired. */
+  takeJump(): { sessionId: string; at: number } | null {
+    const target = this.jumpTarget
+    if (target === undefined) return null
+    if (Date.now() - target.at > JUMP_TTL_MS) {
+      this.jumpTarget = undefined
+      return null
+    }
+    return { sessionId: target.sessionId, at: target.at }
+  }
+
+  confirmJump(sessionId: string): void {
+    if (this.jumpTarget?.sessionId === sessionId) this.jumpTarget = undefined
+  }
+
+  /** A bookmark click: mark read, arm the main window's jump, and focus the main window. */
+  private async openAgent(sessionId: string): Promise<void> {
+    if (!sessionId.startsWith('session-') || sessionId.length > 80) return
+    this.readAgentIds.add(sessionId)
+    this.jumpTarget = { sessionId, at: Date.now() }
+    this.pollAgents(true)
+    await this.openMain()
   }
 }
 
@@ -1678,6 +1958,31 @@ function userText(data: unknown): string {
   const source = asRecord(record.source)
   if (source && source.kind !== undefined && source.kind !== 'user') return ''
   return textOf(record.content)
+}
+
+/**
+ * Model-facing tails the code_agent completion notices append; the ball shows
+ * notices to the user, so the instructions come off. Unknown tails stay.
+ */
+const NOTICE_GUARDS = [
+  'Another Computer Use chat is operating the screen right now. Report this result as text only; do not perform any GUI actions unless the user asks again in this chat.',
+  'Do not restart this task and do not call code_agent for it again unless the user asks.',
+]
+
+/** Only the code_agent completion report becomes a card; the prefix is ours to define. */
+function isCompletionNotice(text: string): boolean {
+  return text.startsWith('Background Code agent session ')
+    || text.startsWith('The user stopped background Code agent session ')
+}
+
+function stripNoticeGuards(text: string): string {
+  let shown = text
+  for (const guard of NOTICE_GUARDS) {
+    while (shown.endsWith(guard)) {
+      shown = shown.slice(0, shown.length - guard.length).replace(/\n+$/, '')
+    }
+  }
+  return shown
 }
 
 function textOf(content: unknown): string {
