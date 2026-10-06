@@ -576,6 +576,13 @@ function main() {
     }, COLLAPSE_MS)
   }
 
+  /** Input clicks only pin; unpinning stays a ball click (or drag). */
+  function pinBall() {
+    if (pinned) return
+    pinned = true
+    document.body.classList.add('pinned')
+  }
+
   function draftOverflows() {
     return prompt.scrollHeight > prompt.clientHeight + 1
   }
@@ -2180,8 +2187,13 @@ function main() {
     insertPlainText(prompt, event.clipboardData?.getData('text/plain') ?? '')
     syncComposerHeight()
   })
+  // Clicking into the input pins the panel, so a draft survives the pointer leaving.
+  prompt.addEventListener('click', () => { pinBall() })
   composer.addEventListener('click', (event) => {
-    if (event.target === composer) prompt.focus()
+    if (event.target === composer) {
+      prompt.focus()
+      pinBall()
+    }
   })
 
   for (const preset of PERMISSION_PRESETS) {
