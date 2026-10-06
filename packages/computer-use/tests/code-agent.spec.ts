@@ -65,6 +65,7 @@ interface FakeAgent {
   readonly session: {
     readonly header?: { readonly agentPreset?: string }
     deriveMessages(): FakeMessage[]
+    snapshotEvents(): readonly { type: string; data: unknown }[]
   }
   whenIdle(): Promise<void>
   followup(message: UserMessage): void
@@ -96,6 +97,8 @@ function createFakeAgent(id: SessionId, options: {
   readonly deriveError?: Error
   readonly onDerive?: () => void
   readonly syncClaimOnStatusSubscribe?: boolean
+  /** Durable session events the completion watch reads for the cancel cause. */
+  readonly events?: { type: string; data: unknown }[]
 } = {}): FakeAgent {
   let status: 'idle' | 'running' = options.status ?? 'idle'
   let idle = Promise.withResolvers<undefined>()
@@ -136,6 +139,9 @@ function createFakeAgent(id: SessionId, options: {
         if (options.messages !== undefined) return options.messages
         if (options.assistant === undefined) return []
         return [{ role: 'assistant', content: [{ type: 'text', text: options.assistant }] }]
+      },
+      snapshotEvents() {
+        return options.events ?? []
       },
     },
     whenIdle() {
@@ -834,6 +840,38 @@ describe('code_agent plugin', () => {
     const body = text({ content: longCaller.followups[0]!.content })
     expect(body).toHaveLength(COMPLETION_BODY_MAX_CHARS)
     expect(body.endsWith('…')).toBe(true)
+  })
+
+  it('tells the caller the user stopped the stretch and not to relaunch it', async () => {
+    const caller = createFakeAgent(CALLER, { status: 'idle' })
+    const code = createFakeAgent(STANDARD, {
+      status: 'running',
+      assistant: 'Wrote half of the document.',
+      events: [{ type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } }],
+    })
+    const first = await setup({ live: new Map([[CALLER, caller], [STANDARD, code]]) })
+    await execute(first.ctx, { task: 'Write a Word document' })
+    code.resolveIdle()
+    await expect.poll(() => caller.followups.length).toBe(1)
+    const body = text({ content: caller.followups[0]!.content })
+    expect(body).toContain('The user stopped background Code agent session')
+    expect(body).toContain('Do not restart this task')
+    expect(body).toContain('Wrote half of the document.')
+
+    // A turn that ends normally keeps the ordinary finished notice.
+    const doneCaller = createFakeAgent(CALLER, { status: 'idle' })
+    const doneCode = createFakeAgent(STANDARD, {
+      status: 'running',
+      assistant: 'Wrote the whole document.',
+      events: [{ type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } }],
+    })
+    const second = await setup({ live: new Map([[CALLER, doneCaller], [STANDARD, doneCode]]) })
+    await execute(second.ctx, { task: 'Write a Word document' })
+    doneCode.resolveIdle()
+    await expect.poll(() => doneCaller.followups.length).toBe(1)
+    const done = text({ content: doneCaller.followups[0]!.content })
+    expect(done).toContain('finished this task')
+    expect(done).not.toContain('Do not restart this task')
   })
 
   it('delivers after Code dispose and after subscribe observes a claimed prompt', async () => {

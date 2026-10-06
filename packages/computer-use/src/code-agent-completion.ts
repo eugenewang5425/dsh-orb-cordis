@@ -91,18 +91,21 @@ async function runWatch(watch: CodeAgentCompletionWatch, signal: AbortSignal): P
       return
     }
     if (await raceAbort(signal, watch.code.whenIdle()) === 'aborted') return
+    const userStopped = lastTurnEndedUserAborted(watch.code)
     const outcome = lastAssistantText(watch.code) ?? NO_ASSISTANT
     if (await raceAbort(signal, watch.caller.whenIdle()) === 'aborted') return
     if (watch.agents.get(watch.caller.id) !== watch.caller) return
     watch.caller.followup(createUserMessage({
       content: [{
         type: 'text',
-        text: completionNoticeText(watch.sessionId, watch.task, outcome, anotherComputerUseRunning(watch)),
+        text: completionNoticeText(watch.sessionId, watch.task, outcome, anotherComputerUseRunning(watch), userStopped),
       }],
       source: {
         kind: 'computer-use',
         form: 'notice',
-        summary: boundContextSummary(`Code agent ${watch.sessionId} finished`),
+        summary: boundContextSummary(userStopped
+          ? `Code agent ${watch.sessionId} stopped by the user`
+          : `Code agent ${watch.sessionId} finished`),
       },
     }))
   } catch (error) {
@@ -194,6 +197,35 @@ export function lastAssistantText(code: Agent): string | undefined {
 }
 
 /**
+ * Whether the session's last closed turn was aborted by a user cancellation.
+ * The main window's stop button cancels with cause 'user' and the durable
+ * turn/end record carries that cause; repair-synthesized closers flatten it,
+ * which reads as not-user.
+ */
+export function lastTurnEndedUserAborted(agent: Agent): boolean {
+  try {
+    const events = (agent.session as {
+      snapshotEvents?: () => readonly unknown[]
+    }).snapshotEvents?.() ?? []
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = asRecord(events[index])
+      if (event?.type !== 'turn/end') continue
+      const reason = asRecord(event.data)?.reason
+      if (asRecord(reason)?.kind !== 'aborted') return false
+      return asRecord(asRecord(reason)?.reason)?.kind === 'user'
+    }
+    return false
+  } catch {
+    // Test fakes and odd sessions may not expose the event log.
+    return false
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : undefined
+}
+
+/**
  * Whether a Computer Use session other than the caller currently holds a turn.
  * The caller's own background Code sessions are standard-preset, so they never
  * count; a registry without `list` (test fakes) reads as an empty screen.
@@ -218,11 +250,17 @@ function completionNoticeText(
   task: string,
   outcome: string,
   screenBusy: boolean,
+  userStopped: boolean,
 ): string {
-  const body = `Background Code agent session ${sessionId} finished this task:\n${task}\n\n${outcome}`
+  const body = userStopped
+    ? `The user stopped background Code agent session ${sessionId} from the main window:\n${task}\n\nLast output before it stopped:\n${outcome}`
+    : `Background Code agent session ${sessionId} finished this task:\n${task}\n\n${outcome}`
   const capped = body.length <= COMPLETION_BODY_MAX_CHARS
     ? body
     : `${body.slice(0, COMPLETION_BODY_MAX_CHARS - 1)}…`
-  // Appended after the cap so the instruction survives a truncated outcome.
-  return screenBusy ? `${capped}\n\n${SCREEN_BUSY_SUFFIX}` : capped
+  // Appended after the cap so the instructions survive a truncated outcome.
+  const guard = userStopped
+    ? '\n\nDo not restart this task and do not call code_agent for it again unless the user asks.'
+    : ''
+  return `${capped}${guard}${screenBusy ? `\n\n${SCREEN_BUSY_SUFFIX}` : ''}`
 }

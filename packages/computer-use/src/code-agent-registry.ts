@@ -9,7 +9,7 @@
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionRequestId } from '@deepseek-ai/dsh-api-session-controller/types'
-import { holdsPrompt, lastAssistantText } from './code-agent-completion.ts'
+import { holdsPrompt, lastAssistantText, lastTurnEndedUserAborted } from './code-agent-completion.ts'
 
 /** Cordis service name the orb host polls the bookmarks from. */
 export const CODE_AGENT_REGISTRY = 'codeAgentRegistry'
@@ -156,6 +156,12 @@ function stopRecord(record: BookmarkRecord): void {
 }
 
 function completeRecord(record: BookmarkRecord, agent: Agent): void {
+  if (lastTurnEndedUserAborted(agent)) {
+    // The user stopped this stretch from the main window: same surface as
+    // code_agent_stop, and the caller's notice says not to relaunch.
+    stopRecord(record)
+    return
+  }
   record.state = 'completed'
   record.endedAt ??= Date.now()
   record.outcome = capOutcome(lastAssistantText(agent))

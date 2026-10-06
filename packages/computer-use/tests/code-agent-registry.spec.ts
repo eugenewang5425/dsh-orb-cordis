@@ -8,7 +8,11 @@ type Listener = (payload?: unknown) => void
 interface FakeAgent {
   status: 'idle' | 'running'
   inbox: { nextTurn: unknown[]; nextStep: unknown[] }
-  session: { deriveMessages(): readonly { role: string; content: readonly { type: string; text?: string }[] }[] }
+  readonly events: { type: string; data: unknown }[]
+  session: {
+    deriveMessages(): readonly { role: string; content: readonly { type: string; text?: string }[] }[]
+    snapshotEvents(): readonly { type: string; data: unknown }[]
+  }
   ctx: { on(event: string, listener: Listener): () => void }
   emit(event: string): void
   setRunning(running: boolean): void
@@ -16,14 +20,19 @@ interface FakeAgent {
   dispose(): void
 }
 
-/** The registry only touches status, inbox, messages, and the two events. */
+/** The registry only touches status, inbox, messages, events, and the two events. */
 function fakeAgent(): FakeAgent {
   const listeners = new Map<string, Set<Listener>>()
   const messages: { role: string; content: { type: string; text?: string }[] }[] = []
+  const events: { type: string; data: unknown }[] = []
   const agent: FakeAgent = {
     status: 'idle',
     inbox: { nextTurn: [], nextStep: [] },
-    session: { deriveMessages: () => messages },
+    events,
+    session: {
+      deriveMessages: () => messages,
+      snapshotEvents: () => events,
+    },
     ctx: {
       on(event, listener) {
         const set = listeners.get(event) ?? new Set()
@@ -202,5 +211,40 @@ describe('code agent bookmark registry', () => {
     const outcome = registry.list()[0]?.outcome ?? ''
     expect(outcome.length).toBeLessThanOrEqual(200)
     expect(outcome.endsWith('…')).toBe(true)
+  })
+
+  it('marks a user-stopped stretch as stopped rather than completed', () => {
+    const registry = createCodeAgentRegistry()
+    const agent = fakeAgent()
+    agent.reply('写到一半的输出')
+    recordQueued(registry, agent)
+    agent.setRunning(true)
+    agent.inbox.nextTurn = []
+    agent.events.push({
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } },
+    })
+    agent.setRunning(false)
+    const [bookmark] = registry.list()
+    expect(bookmark.state).toBe('stopped')
+    expect(typeof bookmark.endedAt).toBe('number')
+    expect(bookmark.outcome).toBeUndefined()
+  })
+
+  it('treats a non-user abort as a completed stretch', () => {
+    const registry = createCodeAgentRegistry()
+    const agent = fakeAgent()
+    agent.reply('parent cancelled')
+    recordQueued(registry, agent)
+    agent.setRunning(true)
+    agent.inbox.nextTurn = []
+    agent.events.push({
+      type: 'turn/end',
+      data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'parent' } } },
+    })
+    agent.setRunning(false)
+    const [bookmark] = registry.list()
+    expect(bookmark.state).toBe('completed')
+    expect(bookmark.outcome).toBe('parent cancelled')
   })
 })
