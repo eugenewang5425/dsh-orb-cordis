@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
 import { describe, it } from 'node:test'
-import { BALL_WINDOW_SIZE, CHROME_INSET, FloatingPlacement, type DisplayPair, type ExpandState, type Rect } from '../src/geometry.ts'
+import { AGENT_STRIP_WIDTH, BALL_WINDOW_SIZE, CHROME_INSET, FloatingPlacement, PANEL_WINDOW_SIZE, type DisplayPair, type ExpandState, type Rect } from '../src/geometry.ts'
 
 const primary = pair(0, 0, 1920, 1080)
 const left = pair(-1463, 0, 1463, 914)
@@ -12,32 +12,57 @@ const css = readFileSync(new URL('../assets/floating.css', import.meta.url), 'ut
 
 describe('expanded placement through the renderer IPC consumers', () => {
   for (const mode of ['running', 'asking'] as const) {
-    for (const target of [{ x: -821, y: 168 }, { x: 200, y: -800 }]) {
-      it(`${mode}: keeps the visible ball at (${target.x}, ${target.y}) during a cross-display drag`, async () => {
-        const f = fixture([left, upper, primary], 1848, 900)
+    for (const strip of [0, AGENT_STRIP_WIDTH]) {
+      for (const target of [{ x: -821, y: 168 }, { x: 200, y: -800 }]) {
+        it(`${mode}, strip=${strip}: keeps the ball at (${target.x}, ${target.y}) during a cross-display drag`, async () => {
+          const f = fixture([left, upper, primary], 1848, 900)
+          f.placement.setStrip(strip)
+          const renderer = rendererFixture(f, f.placement.setExpanded(true), mode)
+          await renderer.moveBall(target.x, target.y)
+          assert.deepEqual(renderer.ball(), target)
+          renderer.assertStrip(strip)
+          await renderer.clampBall()
+          assert.deepEqual(renderer.ball(), target)
+          renderer.assertStrip(strip)
+        })
+      }
+
+      it(`${mode}, strip=${strip}: keeps the ball fixed when clamp changes direction after a work-area change`, async () => {
+        const f = fixture([primary], 600, 300)
+        f.placement.setStrip(strip)
         const renderer = rendererFixture(f, f.placement.setExpanded(true), mode)
-        await renderer.moveBall(target.x, target.y)
-        assert.deepEqual(renderer.ball(), target)
+        const before = renderer.ball()
+        f.displays = [{ ...primary, workArea: { x: 0, y: 0, width: 900, height: 1080 } }]
         await renderer.clampBall()
-        assert.deepEqual(renderer.ball(), target)
+        assert.deepEqual(renderer.ball(), before)
+        renderer.assertStrip(strip)
       })
     }
 
-    it(`${mode}: keeps the visible ball fixed when clamp recalculates direction after a work-area change`, async () => {
-      const f = fixture([primary], 300, 300)
+    it(`${mode}: keeps a cross-display anchor through strip appearance, clearing and collapse`, async () => {
+      const f = fixture([left, primary], 1600, 400)
       const renderer = rendererFixture(f, f.placement.setExpanded(true), mode)
-      const before = renderer.ball()
-      f.displays = [{ ...primary, workArea: { x: 0, y: 0, width: 500, height: 1080 } }]
-      await renderer.clampBall()
-      assert.deepEqual(renderer.ball(), before)
+      const target = { x: -821, y: 400 }
+      await renderer.moveBall(target.x, target.y)
+      for (const strip of [AGENT_STRIP_WIDTH, 0, AGENT_STRIP_WIDTH]) {
+        renderer.applyState(f.placement.setStrip(strip))
+        renderer.assertStrip(strip)
+        assert.deepEqual(renderer.ball(), target)
+      }
+      f.placement.setExpanded(false)
+      assert.deepEqual({ x: f.bounds.x + CHROME_INSET, y: f.bounds.y + CHROME_INSET }, target)
+      renderer.applyState(f.placement.setExpanded(true))
+      assert.deepEqual(renderer.ball(), target)
+      renderer.assertStrip(AGENT_STRIP_WIDTH)
     })
   }
 })
 
 function rendererFixture(f: ReturnType<typeof fixture>, state: ExpandState, mode: 'running' | 'asking') {
   const classes = new Set<string>()
-  const ballSize = Number(css.match(/--ball:\s*(\d+)px;/)[1])
-  const chrome = Number(css.match(/--chrome:\s*(\d+)px;/)[1])
+  const styles = new Map<string, string>()
+  const ballSize = Number(css.match(/--ball:\s*(\d+)px;/)![1])
+  const chrome = Number(css.match(/--chrome:\s*(\d+)px;/)![1])
   assert.match(css, /body\.expand-left #ball\s*\{[^}]*right:\s*var\(--chrome\)/)
   assert.match(css, /body\.expand-up #ball\s*\{[^}]*bottom:\s*var\(--chrome\)/)
   function extract(name: string) {
@@ -46,7 +71,10 @@ function rendererFixture(f: ReturnType<typeof fixture>, state: ExpandState, mode
     return match[0]
   }
   const context = vm.createContext({
-    document: { body: { classList: { toggle(name: string, enabled: boolean) { enabled ? classes.add(name) : classes.delete(name) } } } },
+    document: { body: {
+      classList: { toggle(name: string, enabled: boolean) { enabled ? classes.add(name) : classes.delete(name) } },
+      style: { setProperty(name: string, value: string) { styles.set(name, value) } },
+    } },
     api: {
       move: async (x: number, y: number, canDock: boolean) => {
         assert.equal(canDock, false)
@@ -66,6 +94,14 @@ function rendererFixture(f: ReturnType<typeof fixture>, state: ExpandState, mode
   return {
     moveBall: context.moveBall,
     clampBall: context.clampBall,
+    applyState: context.applyDirection,
+    assertStrip: (strip: number) => {
+      assert.equal(f.bounds.width, PANEL_WINDOW_SIZE.width + strip)
+      assert.equal(styles.get('--strip-w'), `${strip}px`)
+      assert.equal(classes.has('has-strip'), strip > 0)
+      assert.equal(classes.has('strip-left'), strip > 0 && classes.has('expand-left'))
+      assert.equal(classes.has('strip-right'), strip > 0 && classes.has('expand-right'))
+    },
     // Compute the visible ball from the actual CSS rules, independently of geometry's direction.
     ball: () => ({
       x: f.bounds.x + (classes.has('expand-left') ? f.bounds.width - chrome - ballSize : chrome),

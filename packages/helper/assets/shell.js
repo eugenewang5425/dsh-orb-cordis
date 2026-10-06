@@ -20,6 +20,8 @@ const COMPOSER_LINE_PX = 20
 const COMPOSER_MAX_PX = COMPOSER_MIN_PX + COMPOSER_LINE_PX * 3
 const RECOMMENDED_SUFFIX = /\s*(?:\((?:recommended|推荐)\)|（(?:recommended|推荐)）)\s*$/i
 const PERMISSION_PRESETS = ['read-only', 'workspace-write', 'danger-full-access']
+const AGENT_STOP_ICON = '<rect x="4.5" y="4.5" width="7" height="7" rx="1.5" fill="currentColor" stroke="none"></rect>'
+const AGENT_ALERT_ICON = '<path d="M8 2.2L14.6 13.4H1.4L8 2.2Z" stroke="currentColor" stroke-linejoin="round"></path><path d="M8 6.6V9.4" stroke="currentColor"></path><path d="M8 11.4V11.5" stroke="currentColor" stroke-linecap="round"></path>'
 
 const zh = {
   title: '桌面 agent',
@@ -64,6 +66,14 @@ const zh = {
   tccFooter: '打开开关后，请完全退出 {name} 再打开。只关主窗口无效。插件不能替你重启官方应用。',
   tccLater: '稍后',
   tccDismiss: '关闭',
+  agentRunning: '运行中',
+  agentDone: '已完成',
+  agentStopped: '已停止',
+  agentEnded: '已结束',
+  agentFrom: '来自对话',
+  agentDir: '工作目录',
+  agentOpen: '点击在主窗口打开',
+  noticeTitle: '后台任务报告',
 }
 const en = {
   title: 'Desktop agent',
@@ -108,6 +118,14 @@ const en = {
   tccFooter: 'After the switches are on, quit {name} completely and open it again. Closing the main window does not quit. This plugin cannot restart the official app.',
   tccLater: 'Later',
   tccDismiss: 'Dismiss',
+  agentRunning: 'Running',
+  agentDone: 'Done',
+  agentStopped: 'Stopped',
+  agentEnded: 'Ended',
+  agentFrom: 'From chat',
+  agentDir: 'Folder',
+  agentOpen: 'Click to open in the main window',
+  noticeTitle: 'Background task report',
 }
 
 const PROMPT_LIMIT = 8000
@@ -239,6 +257,7 @@ function main() {
   const questionContinue = document.querySelector('#question-continue')
   const questionCancel = document.querySelector('#question-cancel')
   const historyList = document.querySelector('#history-list')
+  const agentStrip = document.querySelector('#agent-strip')
   const status = document.querySelector('#status')
   const prompt = document.querySelector('#prompt')
   const composer = document.querySelector('#composer')
@@ -267,6 +286,8 @@ function main() {
   let permission = 'danger-full-access'
   let permissionOpen = false
   let historyOpen = false
+  let agentItems = []
+  let agentClock
   let pending
   let sessionId = ''
   let avatarSrc = 'deepseek-avatar-square.gif'
@@ -326,6 +347,7 @@ function main() {
     applyStaticText()
     renderPermission()
     renderHistory()
+    renderAgentStrip()
     if (pending !== undefined) renderQuestion()
     if (tccGateVisible && lastTccStatus) showTccGate(lastTccStatus)
     refreshProcessLabel(processGroup)
@@ -338,6 +360,11 @@ function main() {
       const block = blockData.get(key)
       if (block === undefined) continue
       if (block.kind === 'user') continue
+      if (block.kind === 'notice') {
+        const title = node.querySelector('.think-title')
+        if (title !== null) title.textContent = messages.noticeTitle
+        continue
+      }
       if (block.kind === 'reasoning') {
         node.querySelector('.think-title').textContent = messages.think
         node.querySelector('.visually-hidden').textContent = block.running ? messages.running : ''
@@ -434,6 +461,13 @@ function main() {
     document.body.classList.toggle('expand-right', state.horizontal === 'right')
     document.body.classList.toggle('expand-up', state.vertical === 'up')
     document.body.classList.toggle('expand-down', state.vertical === 'down')
+    // The strip rides the expansion side: the window reserves its width on the
+    // far edge, the panel shifts in by the same amount.
+    const strip = typeof state.strip === 'number' && Number.isFinite(state.strip) ? Math.max(0, Math.round(state.strip)) : 0
+    document.body.classList.toggle('has-strip', strip > 0)
+    document.body.classList.toggle('strip-left', strip > 0 && state.horizontal === 'left')
+    document.body.classList.toggle('strip-right', strip > 0 && state.horizontal === 'right')
+    document.body.style.setProperty('--strip-w', `${strip}px`)
   }
 
   function clearDockHoverTimer() {
@@ -506,12 +540,14 @@ function main() {
       expanded = true
       document.body.classList.add('expanded')
       stop.hidden = !running
+      renderAgentStrip()
       syncGif()
       return
     }
     if (!force && (pinned || running || asking())) return
     expanded = false
     document.body.classList.remove('expanded')
+    renderAgentStrip()
     if (docked !== undefined) dockTab.hidden = false
     stop.hidden = true
     syncGif()
@@ -539,6 +575,13 @@ function main() {
       collapseTimer = undefined
       void setExpanded(false)
     }, COLLAPSE_MS)
+  }
+
+  /** Input clicks only pin; unpinning stays a ball click (or drag). */
+  function pinBall() {
+    if (pinned) return
+    pinned = true
+    document.body.classList.add('pinned')
   }
 
   function draftOverflows() {
@@ -681,7 +724,8 @@ function main() {
     node.toggleAttribute('data-preview', !node.hasAttribute('data-expanded') && summary !== '')
   }
 
-  function createThink(node) {
+  function createThink(node, options = {}) {
+    const iconMarkup = options.iconMarkup ?? THINK
     node.dataset.variant = 'think'
     const status = document.createElement('span')
     status.className = 'visually-hidden'
@@ -696,7 +740,7 @@ function main() {
     leading.className = 'think-leading'
     const idle = document.createElement('span')
     idle.className = 'think-icon-idle'
-    idle.append(icon(THINK))
+    idle.append(icon(iconMarkup))
     const hover = document.createElement('span')
     hover.className = 'think-chevron-hover'
     hover.append(icon(CHEVRON_DOWN))
@@ -706,7 +750,7 @@ function main() {
     leading.append(idle, hover, openChevron)
     const title = document.createElement('span')
     title.className = 'think-title'
-    title.textContent = messages.think
+    title.textContent = options.title ?? messages.think
     const separator = document.createElement('span')
     separator.className = 'think-separator'
     separator.setAttribute('aria-hidden', 'true')
@@ -720,6 +764,12 @@ function main() {
     body.className = 'think-body'
     disclosure.append(row, body)
     node.append(status, disclosure)
+    // A notice card ships settled: its one-line summary and body are filled here.
+    if (options.summary !== undefined) {
+      summaryText.textContent = options.summary
+      node.dataset.preview = 'true'
+    }
+    if (options.body !== undefined) renderMarkdownBody(body, options.body, { compact: true })
     const toggle = () => {
       const open = !node.hasAttribute('data-expanded')
       node.toggleAttribute('data-expanded', open)
@@ -741,7 +791,7 @@ function main() {
    * process body; a reply closes that run, so later tools open a new one.
    */
   function placeBlock(node, kind) {
-    if (kind === 'user') {
+    if (kind === 'user' || kind === 'notice') {
       closeProcess()
       transcript.append(node)
       return
@@ -1428,6 +1478,11 @@ function main() {
     }
   }
 
+  /** The notice card's one-line summary: its first non-empty line. */
+  function noticeSummary(text) {
+    return String(text).split('\n').find((line) => line.trim() !== '') ?? ''
+  }
+
   function upsertBlock(block) {
     if (typeof block?.key !== 'string' || typeof block.text !== 'string') return
     blockData.set(block.key, block)
@@ -1443,6 +1498,17 @@ function main() {
         actions.className = 'user-actions'
         actions.append(messageCopyButton(() => bubble.textContent ?? ''))
         node.append(bubble, actions)
+      } else if (block.kind === 'notice') {
+        node = document.createElement('article')
+        node.className = 'block'
+        node.dataset.kind = 'notice'
+        // Folded like the main window's process cards: one summary line until clicked.
+        createThink(node, {
+          iconMarkup: SPARKLE,
+          title: messages.noticeTitle,
+          summary: noticeSummary(block.text),
+          body: block.text,
+        })
       } else if (block.kind === 'assistant') {
         node = document.createElement('article')
         node.className = 'block'
@@ -1479,6 +1545,8 @@ function main() {
     node.toggleAttribute('data-response', block.response === true)
     if (block.kind === 'user') {
       node.querySelector('.user-bubble').textContent = block.text
+    } else if (block.kind === 'notice') {
+      // Settled at creation; nothing per-update.
     } else if (block.kind === 'reasoning') {
       const summary = reasoningSummary(block.text, block.running === true)
       node.querySelector('.think-summary-text').textContent = summary
@@ -1548,6 +1616,129 @@ function main() {
       })
       historyList.append(button)
     }
+  }
+
+  function agentStateText(state) {
+    if (state === 'completed') return messages.agentDone
+    if (state === 'stopped') return messages.agentStopped
+    if (state === 'ended') return messages.agentEnded
+    return messages.agentRunning
+  }
+
+  function agentDurationText(totalMs) {
+    const minutes = Math.floor(Math.max(0, totalMs) / 60_000)
+    if (minutes < 1) return '<1m'
+    if (minutes < 100) return `${minutes}m`
+    return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, '0')}`
+  }
+
+  function agentElapsedText(item) {
+    const start = typeof item.startedAt === 'number' ? item.startedAt : 0
+    const end = item.state === 'running'
+      ? Date.now()
+      : (typeof item.endedAt === 'number' ? item.endedAt : Date.now())
+    return agentDurationText(end - start)
+  }
+
+  function agentTip(item) {
+    const parts = [`${agentStateText(item.state)} · ${agentElapsedText(item)}`]
+    if (typeof item.task === 'string' && item.task !== '') parts.push(item.task)
+    if (typeof item.callerTitle === 'string' && item.callerTitle !== '') parts.push(`${messages.agentFrom}: ${item.callerTitle}`)
+    if (typeof item.cwd === 'string' && item.cwd !== '') parts.push(`${messages.agentDir}: ${item.cwd}`)
+    if (typeof item.outcome === 'string' && item.outcome !== '') parts.push(item.outcome)
+    parts.push(messages.agentOpen)
+    return parts.join('\n')
+  }
+
+  function agentChip(item) {
+    const chip = document.createElement('button')
+    chip.type = 'button'
+    chip.className = 'agent-chip'
+    chip.dataset.state = typeof item.state === 'string' ? item.state : 'running'
+    const color = Number(item.colorIndex)
+    chip.style.setProperty('--agent-color', `var(--agent-c${Number.isFinite(color) ? Math.abs(color) % 4 : 0})`)
+    chip.setAttribute('role', 'listitem')
+    const status = document.createElement('span')
+    status.className = 'agent-chip-status'
+    if (item.state === 'completed') {
+      status.innerHTML = icon(CHECK)
+    } else if (item.state === 'stopped') {
+      status.innerHTML = icon(AGENT_STOP_ICON)
+    } else if (item.state === 'ended') {
+      status.innerHTML = icon(AGENT_ALERT_ICON)
+    } else {
+      const spinner = document.createElement('span')
+      spinner.className = 'agent-spinner'
+      status.append(spinner)
+    }
+    const time = document.createElement('span')
+    time.className = 'agent-chip-time'
+    time.dataset.state = chip.dataset.state
+    time.dataset.startedAt = String(item.startedAt ?? '')
+    time.dataset.endedAt = String(item.endedAt ?? '')
+    time.textContent = agentElapsedText(item)
+    const name = document.createElement('span')
+    name.className = 'agent-chip-name'
+    name.textContent = typeof item.task === 'string' ? item.task : ''
+    chip.append(status, time, name)
+    if (item.unread === true) {
+      const dot = document.createElement('span')
+      dot.className = 'agent-chip-unread'
+      chip.append(dot)
+    }
+    chip.title = agentTip(item)
+    chip.setAttribute('aria-label', `${agentStateText(item.state)}: ${name.textContent}`)
+    chip.addEventListener('click', () => {
+      if (typeof item.sessionId === 'string') api.openAgent?.(item.sessionId)
+    })
+    return chip
+  }
+
+  function renderAgentStrip() {
+    if (agentStrip === null) return
+    agentStrip.replaceChildren()
+    const visible = expanded && agentItems.length > 0
+    agentStrip.hidden = !visible
+    if (!visible) {
+      stopAgentClock()
+      return
+    }
+    for (const item of agentItems) agentStrip.append(agentChip(item))
+    startAgentClock()
+  }
+
+  function startAgentClock() {
+    stopAgentClock()
+    agentClock = setInterval(refreshAgentTimes, 1000)
+  }
+
+  function stopAgentClock() {
+    if (agentClock === undefined) return
+    clearInterval(agentClock)
+    agentClock = undefined
+  }
+
+  function refreshAgentTimes() {
+    if (agentStrip === null) return
+    for (const time of agentStrip.querySelectorAll('.agent-chip-time')) {
+      const start = Number(time.dataset.startedAt)
+      const endedAt = Number(time.dataset.endedAt)
+      const end = time.dataset.state === 'running' || !Number.isFinite(endedAt) || endedAt <= 0
+        ? Date.now()
+        : endedAt
+      time.textContent = agentDurationText(end - (Number.isFinite(start) ? start : 0))
+    }
+  }
+
+  function sortAgentItems(items) {
+    items.sort((left, right) => {
+      const leftRunning = left.state === 'running'
+      const rightRunning = right.state === 'running'
+      if (leftRunning !== rightRunning) return leftRunning ? -1 : 1
+      if (leftRunning) return (left.startedAt ?? 0) - (right.startedAt ?? 0)
+      return (right.endedAt ?? 0) - (left.endedAt ?? 0)
+    })
+    return items
   }
 
   function clearTranscript() {
@@ -1997,8 +2188,13 @@ function main() {
     insertPlainText(prompt, event.clipboardData?.getData('text/plain') ?? '')
     syncComposerHeight()
   })
+  // Clicking into the input pins the panel, so a draft survives the pointer leaving.
+  prompt.addEventListener('click', () => { pinBall() })
   composer.addEventListener('click', (event) => {
-    if (event.target === composer) prompt.focus()
+    if (event.target === composer) {
+      prompt.focus()
+      pinBall()
+    }
   })
 
   for (const preset of PERMISSION_PRESETS) {
@@ -2074,6 +2270,15 @@ function main() {
   api.onHistory((items) => {
     historyItems = Array.isArray(items) ? items : []
     if (historyOpen) renderHistory()
+  })
+  api.onAgents?.((items) => {
+    agentItems = sortAgentItems(Array.isArray(items)
+      ? items.filter((item) => item !== null && typeof item === 'object' && typeof item.sessionId === 'string')
+      : [])
+    renderAgentStrip()
+  })
+  api.onExpandState?.((state) => {
+    if (state !== null && typeof state === 'object') applyDirection(state)
   })
   api.onPermission((preset) => {
     if (typeof preset !== 'string') return
