@@ -22,6 +22,8 @@
   --panel-shadow: 0 4px 8px rgba(17, 17, 17, 0.22);
   /* Bookmark strip: reserved window width and per-conversation attribution hues. */
   --strip-w: 0px;
+  /* How far the chips slide underneath the panel edge: the tucked-ribbon look. */
+  --strip-tuck: 12px;
   --agent-c0: #3573d0;
   --agent-c1: #0f9b8e;
   --agent-c2: #d9730d;
@@ -122,7 +124,8 @@ body.has-strip.strip-right #panel {
 
 #agent-strip {
   position: absolute;
-  top: var(--chrome);
+  /* Start below the panel's rounded corner, like ribbons tucked behind a card. */
+  top: calc(var(--chrome) + var(--panel-radius));
   bottom: var(--chrome);
   display: flex;
   flex-direction: column;
@@ -138,15 +141,18 @@ body.has-strip.strip-right #panel {
   display: none;
 }
 
+/* The far edge of the container reaches under the panel by --strip-tuck, so the
+ * right-aligned chips disappear behind the panel edge instead of floating
+ * beside it. */
 body.has-strip.strip-left #agent-strip {
   left: 0;
-  width: var(--strip-w);
+  right: calc(320px + var(--chrome) - var(--strip-tuck));
   align-items: flex-end;
 }
 
 body.has-strip.strip-right #agent-strip {
   right: 0;
-  width: var(--strip-w);
+  left: calc(320px + var(--chrome) - var(--strip-tuck));
   align-items: flex-start;
 }
 
