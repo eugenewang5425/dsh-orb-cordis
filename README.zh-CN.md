@@ -92,7 +92,7 @@ Helper（自带的下载版 Electron，独立 userData）
 
 - **按 tarball 直链装**——`https://registry.npmmirror.com/dsh-orb/-/dsh-orb-<版本>.tgz`（npmjs 主站：`https://registry.npmjs.org/dsh-orb/-/dsh-orb-<版本>.tgz`）。
 
-**刚发布的版本在 24 小时内按名字装可能仍解析到上一个版本。** 官方客户端内置的 pnpm 11 默认开启 `minimumReleaseAge`（1440 分钟）：按名字解析时会退回到"发布满 24 小时的最新版本"——这是供应链保护，不是网络问题。想立即拿到新版本：用上面的 tarball 直链，或在 profile 的 `pnpm-workspace.yaml` 里豁免该包：
+**刚发布的版本在 24 小时内按名字装可能仍解析到上一个版本。** 官方客户端内置的 pnpm 11 默认开启 `minimumReleaseAge`（1440 分钟）：按名字解析时会退回到"发布满 24 小时的最新版本"——这是供应链保护，不是网络问题。想立即拿到新版本：装 `dsh-orb@<版本号>`（显式版本会跳过闸门、留下干净的 lockfile）、用上面的 tarball 直链、或在 profile 的 `pnpm-workspace.yaml` 里豁免该包：
 
 ```yaml
 minimumReleaseAgeExclude:

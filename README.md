@@ -92,7 +92,7 @@ Releases are published to the npm registry and served from npmmirror. The instal
 
 - **By tarball URL** — `https://registry.npmmirror.com/dsh-orb/-/dsh-orb-<version>.tgz` (npmjs mirror: `https://registry.npmjs.org/dsh-orb/-/dsh-orb-<version>.tgz`).
 
-**A just-published version can resolve to the previous one for up to 24 hours.** The official client bundles pnpm 11, whose `minimumReleaseAge` default (1440 minutes) makes a named install settle for the newest version published more than 24 hours ago — a supply-chain guard, not a network problem. To get a fresh release immediately, install its tarball URL (above), or exempt the package in the profile's `pnpm-workspace.yaml`:
+**A just-published version can resolve to the previous one for up to 24 hours.** The official client bundles pnpm 11, whose `minimumReleaseAge` default (1440 minutes) makes a named install settle for the newest version published more than 24 hours ago — a supply-chain guard, not a network problem. To get a fresh release immediately, install `dsh-orb@<version>` (an explicit version skips the gate and leaves a clean lockfile), use the tarball URL (above), or exempt the package in the profile's `pnpm-workspace.yaml`:
 
 ```yaml
 minimumReleaseAgeExclude:
