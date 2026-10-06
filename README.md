@@ -101,6 +101,8 @@ minimumReleaseAgeExclude:
 
 With an older version installed there is no need to reinstall: the floating-ball card in the main window's settings page checks for and installs updates, and records the exemption itself.
 
+**Does the in-app update fail with `operation-error`?** Install the tarball URL above from the plugin page instead — releases before 0.1.3 asked the plugin manager for a GitHub release tarball this repository never publishes, so their update button can fail. Installing the tarball once replaces the bundle and future updates work. The raw failure detail lives in the profile's `.plugin-manager/logs/operation-*/pnpm.log`.
+
 ### From a local build
 
 ```sh

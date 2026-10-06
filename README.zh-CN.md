@@ -101,6 +101,8 @@ minimumReleaseAgeExclude:
 
 已装旧版时无需重装：主窗口设置页的悬浮球卡片可检查并一键更新（更新流程会自己写入这条豁免）。
 
+**插件内更新报 `operation-error` 怎么办？** 改用插件页安装上面的 tarball 直链——0.1.3 之前的版本会让插件管理器去取本仓库从未发布过的 GitHub release 包，更新按钮因此可能失败；手动装一次 tarball 即替换旧包，之后的更新恢复正常。原始失败细节在 profile 的 `.plugin-manager/logs/operation-*/pnpm.log` 里。
+
 ### 从本地构建安装
 
 ```sh
