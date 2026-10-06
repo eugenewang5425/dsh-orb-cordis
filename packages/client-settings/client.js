@@ -599,7 +599,7 @@ window.__ModuleLoader__.load({
 .dsh-orb-set-fields:disabled { opacity: 0.55; }
 `
 
-    const inject = ['slots', 'sessions']
+    const inject = ['slots']
 
     function apply(ctx) {
       if (!document.getElementById('dsh-orb-settings-style')) {
@@ -616,9 +616,11 @@ window.__ModuleLoader__.load({
         inject: () => ({}),
       }, OrbSettingsSection))
       // Bookmark jump bridge: the ball arms a target on click, the main window
-      // consumes it by opening that session. The same pattern as ui-overlay-chat.
+      // consumes it by opening that session. Switching must go through the
+      // workspace navigator: a bare sessions.retain would stack a second
+      // mainView reference while the current session keeps its own, and the
+      // main view would never move.
       ctx.effect(() => {
-        let held
         const poll = setInterval(() => { void consume() }, 2000)
         async function consume() {
           let target
@@ -629,15 +631,19 @@ window.__ModuleLoader__.load({
           }
           const sessionId = target && typeof target.sessionId === 'string' ? target.sessionId : ''
           if (sessionId === '') return
-          let next
+          let workspace
           try {
-            next = ctx.sessions.retain(sessionId, { source: 'mainView' })
+            workspace = ctx.get('uiWorkspace')
+          } catch {
+            workspace = undefined
+          }
+          if (workspace === undefined || typeof workspace.openSession !== 'function') return
+          try {
+            workspace.openSession(sessionId)
           } catch {
             // The session may not be listed yet; the target stays armed until it expires.
             return
           }
-          held?.release()
-          held = next
           try {
             await mutate('/.dsh-orb/jump', { sessionId })
           } catch {
@@ -646,8 +652,6 @@ window.__ModuleLoader__.load({
         }
         return () => {
           clearInterval(poll)
-          held?.release()
-          held = undefined
         }
       }, 'dsh-orb: bookmark jump bridge')
     }

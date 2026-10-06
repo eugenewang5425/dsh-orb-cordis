@@ -157,8 +157,8 @@ interface AgentBookmarkRegistry {
 const CODE_AGENT_REGISTRY = 'codeAgentRegistry'
 /** Strip poll cadence; the helper ticks elapsed clocks itself. */
 const AGENT_POLL_MS = 1_000
-/** How long a ball-initiated jump target stays valid for the main window's client plugin. */
-const JUMP_TTL_MS = 15_000
+/** How long a ball-initiated jump target stays valid: long enough for a cold app launch. */
+const JUMP_TTL_MS = 30_000
 /** Caller conversations cycle through this many attribution colors. */
 const AGENT_COLOR_COUNT = 4
 
