@@ -257,7 +257,7 @@ export class UpdateChecker {
     this.error = null
     this.pendingBuilds = []
     try {
-      exemptReleaseAge(this.store.dir, this.own.name, version)
+      exemptReleaseAge(this.store.dir, this.own.name)
       const result = await manager.installBundle(installSpec(version, this.source, this.own.name), {
         requestId: `dsh-orb-update-${Date.now()}`,
         ...approvedBuilds === undefined ? {} : { approvedBuilds },
@@ -377,24 +377,32 @@ export function registryTarballUrl(base: string, name: string, version: string):
 export function installSpec(version: string, source: string | undefined, name: string): string {
   const overridden = process.env.DSH_ORB_UPDATE_URL?.trim()
   if (overridden !== undefined && overridden !== '') return overridden
-  if (source !== undefined) return registryTarballUrl(source, name, version)
-  return releaseTarballUrl(version)
+  // Releases ship through the registries. An unknown source (the check has not
+  // answered in this process yet) still installs from the primary mirror: the
+  // repository's GitHub releases are dormant, so no release tarball exists to
+  // fetch, and the GitHub address only yields a TLS/fetch failure.
+  const base = source ?? REGISTRY_BASES[0]
+  if (base === undefined) return releaseTarballUrl(version)
+  return registryTarballUrl(base, name, version)
 }
 
 /**
- * Record the version being installed as an explicit exemption from pnpm's
- * minimum-release-age gate. pnpm v11 defaults `minimumReleaseAge` to 24 hours,
- * so a registry-named resolution silently settles for an older version while a
- * fresh release waits out the cutoff (observed 2026-10-06: `dsh-orb` resolved
- * to 0.1.1 everywhere the hour after 0.1.2 shipped). pnpm records such an
- * exemption itself for explicit installs; when the manager's pipeline does not,
- * the update writes it first. Best-effort: an unreadable or unexpected file
- * skips the write, and the install proceeds on pnpm's own defaults.
+ * Record the package as an explicit exemption from pnpm's minimum-release-age
+ * gate. pnpm v11 defaults `minimumReleaseAge` to 24 hours, so a registry-named
+ * resolution silently settles for an older version while a fresh release waits
+ * out the cutoff (observed 2026-10-06: `dsh-orb` resolved to 0.1.1 everywhere
+ * the hour after 0.1.2 shipped), and the manager's install pipeline verifies the
+ * lockfile against the gate before pnpm's own auto-exemption can apply. The
+ * entry is the bare package name — pnpm grants it to every version, and unlike
+ * exact `name@version` entries it passes the lockfile verification path
+ * reliably (observed: versioned entries still failed verification). Best-effort:
+ * an unreadable or unexpected file skips the write, and the install proceeds
+ * on pnpm's own defaults.
  */
-function exemptReleaseAge(profileDir: string, name: string, version: string): void {
+function exemptReleaseAge(profileDir: string, name: string): void {
   try {
     const file = join(profileDir, 'pnpm-workspace.yaml')
-    const next = withReleaseAgeExclusion(readFileSync(file, 'utf8'), name, version)
+    const next = withReleaseAgeExclusion(readFileSync(file, 'utf8'), name)
     if (next !== undefined) writeFileSync(file, next)
   } catch {
     // No workspace file (dev checkout, older profile): nothing to exempt.
@@ -402,13 +410,12 @@ function exemptReleaseAge(profileDir: string, name: string, version: string): vo
 }
 
 /**
- * Append `name@version` to the profile's `minimumReleaseAgeExclude` list.
- * Returns the new text, or undefined when the entry is already covered
- * (bare name or exact version) or the file is not the block list pnpm writes.
+ * Append the package name to the profile's `minimumReleaseAgeExclude` list.
+ * Returns the new text, or undefined when the bare name is already exempt or
+ * the file is not the block list pnpm writes.
  */
-export function withReleaseAgeExclusion(text: string, name: string, version: string): string | undefined {
-  if (name === '' || version === '') return undefined
-  const wanted = `${name}@${version}`
+export function withReleaseAgeExclusion(text: string, name: string): string | undefined {
+  if (name === '') return undefined
   const lines = text.split('\n')
   let key = -1
   for (let index = 0; index < lines.length; index += 1) {
@@ -422,17 +429,17 @@ export function withReleaseAgeExclusion(text: string, name: string, version: str
   }
   if (key === -1) {
     const head = text === '' || text.endsWith('\n') ? text : `${text}\n`
-    return `${head}minimumReleaseAgeExclude:\n  - ${wanted}\n`
+    return `${head}minimumReleaseAgeExclude:\n  - ${name}\n`
   }
   let last = key
   for (let index = key + 1; index < lines.length; index += 1) {
     const line = lines[index] ?? ''
     if (!/^[ \t]+-[ \t]+\S/.test(line)) break
     const entry = line.slice(line.indexOf('-') + 1).trim().replace(/^['"]|['"]$/g, '')
-    if (entry === name || entry === wanted) return undefined
+    if (entry === name) return undefined
     last = index
   }
-  lines.splice(last + 1, 0, `  - ${wanted}`)
+  lines.splice(last + 1, 0, `  - ${name}`)
   return lines.join('\n')
 }
 

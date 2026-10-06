@@ -113,28 +113,35 @@ describe('update versions', () => {
 })
 
 describe('release-age exemption', () => {
-  it('appends the entry to an existing exclude list', () => {
+  it('appends the bare name to an existing exclude list', () => {
     const before = 'packages:\n  - .\n\nnodeLinker: hoisted\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n'
     assert.equal(
-      withReleaseAgeExclusion(before, 'dsh-orb', '0.1.2'),
-      'packages:\n  - .\n\nnodeLinker: hoisted\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb@0.1.2\n',
+      withReleaseAgeExclusion(before, 'dsh-orb'),
+      'packages:\n  - .\n\nnodeLinker: hoisted\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb\n',
     )
   })
 
   it('adds the key when the file has none', () => {
     assert.equal(
-      withReleaseAgeExclusion('packages:\n  - .\n', 'dsh-orb', '0.1.2'),
-      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.2\n',
+      withReleaseAgeExclusion('packages:\n  - .\n', 'dsh-orb'),
+      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb\n',
     )
   })
 
-  it('keeps quiet when the version or the whole package is already exempt', () => {
-    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb@0.1.2\n', 'dsh-orb', '0.1.2'), undefined)
-    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb\n', 'dsh-orb', '0.1.2'), undefined)
+  it('keeps quiet when the package is already exempt by name', () => {
+    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb\n', 'dsh-orb'), undefined)
+    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb\n  - other\n', 'dsh-orb'), undefined)
+  })
+
+  it('adds the bare name even when only versioned entries exist', () => {
+    assert.equal(
+      withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb@0.1.2\n', 'dsh-orb'),
+      'minimumReleaseAgeExclude:\n  - dsh-orb@0.1.2\n  - dsh-orb\n',
+    )
   })
 
   it('leaves an unfamiliar file shape alone', () => {
-    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude: [dsh-orb]\n', 'dsh-orb', '0.1.2'), undefined)
+    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude: [dsh-orb]\n', 'dsh-orb'), undefined)
   })
 
   it('writes the exemption into the profile before installing', async () => {
@@ -148,7 +155,7 @@ describe('release-age exemption', () => {
     await update.install()
     assert.equal(
       readFileSync(join(profile.dir, 'pnpm-workspace.yaml'), 'utf8'),
-      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb@0.2.0\n',
+      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb\n',
     )
   })
 })
@@ -165,8 +172,8 @@ describe('update sources', () => {
     )
     assert.equal(
       installSpec('0.2.0', undefined, 'dsh-orb'),
-      releaseTarballUrl('0.2.0'),
-      'GitHub stays the installer source when no registry answered',
+      'https://registry.npmmirror.com/dsh-orb/-/dsh-orb-0.2.0.tgz',
+      'an unknown source installs from the primary mirror, not the dormant release tarball',
     )
     process.env.DSH_ORB_UPDATE_URL = 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz'
     assert.equal(
@@ -242,8 +249,8 @@ describe('update sources', () => {
         assert.deepEqual(announced, ['0.2.0'], 'the release answered after the registry 404ed')
         await update.install()
         assert.deepEqual(fake.specs, [
-          'https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v0.2.0/dsh-orb-0.2.0.tgz',
-        ])
+          'https://registry.npmmirror.com/dsh-orb/-/dsh-orb-0.2.0.tgz',
+        ], 'installs from the primary mirror: this repository publishes no release tarballs')
       })
     } finally {
       registry.close()
@@ -392,14 +399,14 @@ describe('update checker', () => {
     assert.equal(update.state().autoCheck, true)
   })
 
-  it('runs the official installer against the release tarball', async () => {
+  it('installer falls back to the primary mirror when no check source is known', async () => {
     const profile = store()
     const { update, specs } = checker({ store: profile, latest: '0.2.0' })
     await update.check()
     await update.install()
     assert.deepEqual(specs, [
-      'https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v0.2.0/dsh-orb-0.2.0.tgz',
-    ])
+      'https://registry.npmmirror.com/dsh-orb/-/dsh-orb-0.2.0.tgz',
+    ], 'the GitHub release tarball is dormant and must not be the fallback')
     const state = update.state()
     assert.equal(state.updating, false)
     assert.equal(state.error, null)
