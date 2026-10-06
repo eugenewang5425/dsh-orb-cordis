@@ -298,8 +298,9 @@ describe('ball control socket', { concurrency: 1 }, () => {
       client.send({ type: 'open', sessionId: 'session-keep' })
       await waitFor(() => client.messages.slice(mark).some((message) => message.type === 'block' && message.text === 'click'))
       const blocks = client.messages.slice(mark).filter((message) => message.type === 'block')
-      assert.deepEqual(blocks.map((message) => message.text), ['你好', '跳过', '好', 'click', 'click'])
-      assert.equal(blocks.find((message) => message.text === '跳过')?.kind, 'notice')
+      assert.deepEqual(blocks.map((message) => message.text), ['你好', '好', 'click', 'click'])
+      // The generic plugin notice stays invisible; only code_agent reports get a card.
+      assert.equal(blocks.some((message) => message.text === '跳过'), false)
       assert.equal(harness.calls.create.at(-1)?.sessionId, 'session-keep')
       assert.equal(harness.calls.create.at(-1)?.agentPreset, 'computer-use')
       const creates = harness.calls.create.length
@@ -669,9 +670,20 @@ describe('ball control socket', { concurrency: 1 }, () => {
       assert.equal(notice.text.includes('已完成。'), true)
       assert.equal(notice.text.includes('Do not restart this task'), false)
 
-      harness.inject(sessionId, { type: 'turn/start', seq: 2, data: { turn: 1 } })
+      harness.inject(sessionId, {
+        type: 'user/message',
+        seq: 2,
+        data: {
+          source: { kind: 'computer-use', form: 'notice' },
+          content: [{ type: 'text', text: 'Current runtime context: macOS\n当前 frontmost window: Finder' }],
+        },
+      })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      assert.equal(client.messages.some((message) => message.type === 'block' && message.text.includes('Current runtime context')), false)
+
+      harness.inject(sessionId, { type: 'turn/start', seq: 3, data: { turn: 1 } })
       await waitFor(() => client.messages.some((message) => message.type === 'turn' && message.running === true))
-      harness.inject(sessionId, { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } })
+      harness.inject(sessionId, { type: 'turn/end', seq: 4, data: { turn: 1, reason: { kind: 'completed' } } })
       await waitFor(() => client.messages.some((message) => message.type === 'turn' && message.running === false))
     } finally {
       client.socket.destroy()

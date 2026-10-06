@@ -797,10 +797,11 @@ export class OrbRuntime {
         this.block(`user:${seq}`, 'user', text, false, 'set')
         return
       }
-      // A plugin notice (e.g. the code_agent completion report): render it live
-      // and on replay as a subdued block, with model-facing guard tails stripped.
+      // The code_agent completion report is the only notice the ball shows as
+      // a card: pre-step context injections (frontmost window, etc.) share the
+      // source shape and stay invisible.
       const text = stripNoticeGuards(textOf(record?.content))
-      if (!text.trim()) return
+      if (!isCompletionNotice(text)) return
       this.block(`notice:${seq}`, 'notice', text, false, 'set')
       return
     }
@@ -1957,6 +1958,12 @@ const NOTICE_GUARDS = [
   'Another Computer Use chat is operating the screen right now. Report this result as text only; do not perform any GUI actions unless the user asks again in this chat.',
   'Do not restart this task and do not call code_agent for it again unless the user asks.',
 ]
+
+/** Only the code_agent completion report becomes a card; the prefix is ours to define. */
+function isCompletionNotice(text: string): boolean {
+  return text.startsWith('Background Code agent session ')
+    || text.startsWith('The user stopped background Code agent session ')
+}
 
 function stripNoticeGuards(text: string): string {
   let shown = text
