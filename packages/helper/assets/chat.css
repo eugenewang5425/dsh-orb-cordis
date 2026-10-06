@@ -13,6 +13,14 @@
   gap: 6px;
 }
 
+/* Transcript children never compress — the container scrolls instead. Without
+ * this, the contain:size notice card has a zero automatic minimum height and
+ * collapses under flex-shrink when the conversation overflows, painting its
+ * content over the neighboring blocks. */
+#transcript > * {
+  flex-shrink: 0;
+}
+
 /* ----- User message (MessageItem) ----- */
 
 .user-row {
