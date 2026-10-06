@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { describe, it } from 'node:test'
 import { attachDisplayRecovery } from '../src/display-events.ts'
 import {
-  BALL_SIZE, BALL_WINDOW_SIZE, CHROME_INSET, DOCK_HIT_HEIGHT, DOCK_HIT_WIDTH,
+  AGENT_STRIP_WIDTH, BALL_SIZE, BALL_WINDOW_SIZE, CHROME_INSET, DOCK_HIT_HEIGHT, DOCK_HIT_WIDTH,
   FloatingPlacement, PANEL_WINDOW_SIZE, ballOriginFromWindow, type DisplayPair, type Rect,
 } from '../src/geometry.ts'
 
@@ -71,6 +71,51 @@ describe('display topology recovery', () => {
     assertBallInside(f.ball(), primary.workArea)
   })
 
+  it('preserves the bookmark reserve and direction after removing the ball display', () => {
+    const f = fixture([left, primary], -400, 600)
+    f.placement.setStrip(AGENT_STRIP_WIDTH)
+    const state = f.placement.setExpanded(true)
+    f.displays = [primary]
+    f.placement.recoverDisplays(f.displays)
+    assert.equal(f.bounds.width, PANEL_WINDOW_SIZE.width + AGENT_STRIP_WIDTH)
+    assertContentInside(f.bounds, primary.workArea)
+    assertBallInside(ballOriginFromWindow(f.bounds, state), primary.workArea)
+    const recovered = { ...f.bounds }
+    for (let i = 0; i < 5; i += 1) f.placement.recoverDisplays(f.displays)
+    assert.deepEqual(f.bounds, recovered)
+    assert.equal(f.window.visible, false)
+  })
+
+  it('keeps the ball reachable when the panel fits but the panel plus strip does not', () => {
+    const f = fixture([primary], 1800, 900)
+    f.placement.setStrip(AGENT_STRIP_WIDTH)
+    const state = f.placement.setExpanded(true)
+    const narrow = pair(-400, -800, 400, 800)
+    f.displays = [narrow]
+    f.placement.recoverDisplays(f.displays)
+    assert.equal(f.bounds.width, PANEL_WINDOW_SIZE.width + AGENT_STRIP_WIDTH)
+    assertBallInside(ballOriginFromWindow(f.bounds, state), narrow.workArea)
+    const recovered = { ...f.bounds }
+    f.placement.recoverDisplays(f.displays)
+    assert.deepEqual(f.bounds, recovered)
+  })
+
+  it('keeps the recovered ball stable as bookmarks clear and reappear', () => {
+    const f = fixture([left, primary], -400, 600)
+    f.placement.setStrip(AGENT_STRIP_WIDTH)
+    const state = f.placement.setExpanded(true)
+    f.displays = [primary]
+    f.placement.recoverDisplays(f.displays)
+    const ball = ballOriginFromWindow(f.bounds, state)
+    for (const strip of [0, AGENT_STRIP_WIDTH]) {
+      const next = f.placement.setStrip(strip)
+      assert.equal(next.expanded, true)
+      assert.equal(next.strip, strip)
+      assert.equal(f.bounds.width, PANEL_WINDOW_SIZE.width + strip)
+      assert.deepEqual(ballOriginFromWindow(f.bounds, next), ball)
+    }
+  })
+
   it('keeps the ball reachable when the work area is smaller than the fixed panel', () => {
     const f = fixture([primary], 1800, 900)
     const state = f.placement.setExpanded(true)
@@ -109,6 +154,7 @@ describe('display topology recovery', () => {
       t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
       const old = pair(-1463, -914, 1463, 914)
       const f = fixture([old], side === 'left' ? -1480 : -55, -100)
+      f.placement.setStrip(AGENT_STRIP_WIDTH)
       const docking = f.placement.clamp()
       t.mock.timers.tick(300)
       assert.equal((await docking).docked, side)
@@ -126,6 +172,10 @@ describe('display topology recovery', () => {
       t.mock.timers.tick(400)
       assert.equal((await undocking).docked, undefined)
       assertBallInside(f.ball(), work.workArea)
+      const expanded = f.placement.setExpanded(true)
+      assert.equal(expanded.strip, AGENT_STRIP_WIDTH)
+      assert.equal(f.bounds.width, PANEL_WINDOW_SIZE.width + AGENT_STRIP_WIDTH)
+      assertContentInside(f.bounds, work.workArea)
     })
   }
 
