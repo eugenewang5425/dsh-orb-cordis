@@ -16,6 +16,8 @@ function loadSection() {
   const calls = []
   let mode = 'ready'
   let confirm = false
+  let jump = null
+  let workspace
   const intervals = []
   const snapshot = {
     supported: true,
@@ -105,6 +107,11 @@ function loadSection() {
     fetch: async (path, options = {}) => {
       calls.push({ path, options })
       if (String(path).includes('token') || String(path).startsWith('http')) throw new Error(`credentialed fetch ${path}`)
+      if (path === '/.dsh-orb/jump') {
+        if (options.method === 'POST') return json({ ok: true })
+        if (jump === null) return { ok: false, status: 404, async text() { return JSON.stringify({ error: 'missing' }) } }
+        return json(jump)
+      }
       if (path === '/.dsh-orb/settings') {
         return json(mode === 'linux' ? { ...snapshot, supported: false, tcc: { ...snapshot.tcc, applicable: false } } : snapshot)
       }
@@ -146,6 +153,9 @@ function loadSection() {
       inject(_name, register) { register() },
       register(spec, Component) { registered = { spec, Component } },
     },
+    get(name) {
+      return name === 'uiWorkspace' ? workspace : undefined
+    },
     effect(run) { return run() },
   }
   plugin.apply(ctx)
@@ -167,7 +177,7 @@ function loadSection() {
     spec: registered.spec,
     render,
     flush,
-    /** Re-render the page, then run the polling callback it registered while an install runs. */
+    /** Re-render the page, then run every registered interval once (timers persist). */
     async tick() {
       ran.clear()
       for (let index = 0; index < effects.length; index += 1) {
@@ -176,14 +186,16 @@ function loadSection() {
         await effects[index]()
       }
       await settle()
-      const pending = intervals.slice()
-      intervals.length = 0
-      for (const interval of pending) await interval.fn()
+      for (const interval of [...intervals]) await interval.fn()
       await settle()
-      return pending.length
+      return intervals.length
     },
     setMode(next) { mode = next },
     setConfirm(next) { confirm = next },
+    /** Arm (or clear) the ball-initiated jump target the bridge polls for. */
+    setJump(next) { jump = next },
+    /** Provide (or remove) the workspace navigator the bridge opens sessions through. */
+    setWorkspace(next) { workspace = next },
     setFile(next) { file = next },
     setLang(next) { sandbox.document.documentElement.lang = next },
     /** Replace the whole update block, or drop it as a host without a version would. */
@@ -314,6 +326,31 @@ describe('settings section', () => {
     assert.equal(page.spec.label(), '悬浮球')
     page.setLang('')
     assert.equal(page.spec.label(), '悬浮球', 'no lang falls back to the browser languages')
+  })
+
+  it('opens the armed jump target once and confirms it without re-opening', async () => {
+    const page = loadSection()
+    const opened = []
+    page.setWorkspace({ openSession(id) { opened.push(id) } })
+    page.setJump({ sessionId: 'session-agent-9', at: 7 })
+    await page.tick()
+    assert.deepEqual(opened, ['session-agent-9'])
+    const posts = () => page.calls.filter((call) => call.path === '/.dsh-orb/jump' && call.options.method === 'POST')
+    assert.equal(posts().length, 1, 'the confirmed target is consumed with a POST')
+    assert.deepEqual(JSON.parse(posts()[0].options.body), { sessionId: 'session-agent-9' })
+
+    // The same armed target read again (confirm lost) must re-confirm only:
+    // re-opening would yank the main view back on every poll.
+    page.setJump({ sessionId: 'session-agent-9', at: 7 })
+    await page.tick()
+    assert.deepEqual(opened, ['session-agent-9'])
+    assert.equal(posts().length, 2)
+
+    // A re-armed target (new timestamp) is a fresh click and opens again.
+    page.setJump({ sessionId: 'session-agent-9', at: 99 })
+    await page.tick()
+    assert.deepEqual(opened, ['session-agent-9', 'session-agent-9'])
+    assert.equal(posts().length, 3)
   })
 
   it('offers the new version and installs it without leaving the page', async () => {

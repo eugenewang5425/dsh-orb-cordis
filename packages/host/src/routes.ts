@@ -52,7 +52,7 @@ export interface OrbControl {
   setBallEnabled(enabled: boolean): Promise<void>
   helperStatus?(): string
   /** The pending ball-initiated jump target, or null once consumed or expired. */
-  takeJump(): { sessionId: string } | null
+  takeJump(): { sessionId: string; at: number } | null
   /** Consumes the jump target armed by a matching bookmark click. */
   confirmJump(sessionId: string): void
   updateState(): UpdateState
@@ -136,7 +136,8 @@ async function handle(deps: RouteDeps, req: IncomingMessage, res: ServerResponse
   // Bookmark jumps sit above the platform gate: the target is armed by the ball,
   // and the client plugin in the main window consumes it with a retain call.
   if (method === 'GET' && path === `${PREFIX}/jump`) {
-    sendJson(res, 200, { sessionId: deps.control.takeJump()?.sessionId ?? null })
+    const target = deps.control.takeJump()
+    sendJson(res, 200, { sessionId: target?.sessionId ?? null, at: target?.at ?? null })
     return
   }
   if (method === 'POST' && path === `${PREFIX}/jump`) {

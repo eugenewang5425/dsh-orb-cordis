@@ -1760,14 +1760,14 @@ export class OrbRuntime {
   }
 
   /** One-shot jump target for the main window's client plugin. `null` once consumed or expired. */
-  takeJump(): { sessionId: string } | null {
+  takeJump(): { sessionId: string; at: number } | null {
     const target = this.jumpTarget
     if (target === undefined) return null
     if (Date.now() - target.at > JUMP_TTL_MS) {
       this.jumpTarget = undefined
       return null
     }
-    return { sessionId: target.sessionId }
+    return { sessionId: target.sessionId, at: target.at }
   }
 
   confirmJump(sessionId: string): void {

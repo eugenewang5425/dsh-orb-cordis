@@ -353,7 +353,7 @@ describe('settings routes', () => {
     let armed: string | undefined = 'session-agent-9'
     const control: OrbControl = {
       helperAuthorized: () => false,
-      takeJump: () => armed === undefined ? null : { sessionId: armed },
+      takeJump: () => armed === undefined ? null : { sessionId: armed, at: 1234 },
       confirmJump(sessionId) {
         if (armed === sessionId) armed = undefined
       },

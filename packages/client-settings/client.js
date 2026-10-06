@@ -619,8 +619,11 @@ window.__ModuleLoader__.load({
       // consumes it by opening that session. Switching must go through the
       // workspace navigator: a bare sessions.retain would stack a second
       // mainView reference while the current session keeps its own, and the
-      // main view would never move.
+      // main view would never move. The armed target is confirmed with a POST
+      // via request() — mutate() lives inside the settings component and is
+      // not in scope here.
       ctx.effect(() => {
+        let openedKey = ''
         const poll = setInterval(() => { void consume() }, 2000)
         async function consume() {
           let target
@@ -630,24 +633,38 @@ window.__ModuleLoader__.load({
             return
           }
           const sessionId = target && typeof target.sessionId === 'string' ? target.sessionId : ''
-          if (sessionId === '') return
-          let workspace
-          try {
-            workspace = ctx.get('uiWorkspace')
-          } catch {
-            workspace = undefined
-          }
-          if (workspace === undefined || typeof workspace.openSession !== 'function') return
-          try {
-            workspace.openSession(sessionId)
-          } catch {
-            // The session may not be listed yet; the target stays armed until it expires.
+          if (sessionId === '') {
+            openedKey = ''
             return
           }
+          // The arm timestamp makes the key: reading the same armed target
+          // twice means the earlier confirm failed — re-confirm only, never
+          // re-open, or every poll would yank the main view back.
+          const key = `${sessionId}:${typeof target.at === 'number' ? target.at : 0}`
+          if (key !== openedKey) {
+            let workspace
+            try {
+              workspace = ctx.get('uiWorkspace')
+            } catch {
+              workspace = undefined
+            }
+            if (workspace === undefined || typeof workspace.openSession !== 'function') return
+            try {
+              workspace.openSession(sessionId)
+            } catch {
+              // The session may not be listed yet; the target stays armed until it expires.
+              return
+            }
+            openedKey = key
+          }
           try {
-            await mutate('/.dsh-orb/jump', { sessionId })
+            await request('/.dsh-orb/jump', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ sessionId }),
+            })
           } catch {
-            // Consuming is best-effort: an expired target is harmless.
+            // Consuming is best-effort; the same-target guard above stops any yank loop.
           }
         }
         return () => {
