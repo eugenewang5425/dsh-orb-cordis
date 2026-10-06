@@ -361,8 +361,8 @@ function main() {
       if (block === undefined) continue
       if (block.kind === 'user') continue
       if (block.kind === 'notice') {
-        const label = node.querySelector('.notice-label')
-        if (label !== null) label.textContent = messages.noticeTitle
+        const title = node.querySelector('.think-title')
+        if (title !== null) title.textContent = messages.noticeTitle
         continue
       }
       if (block.kind === 'reasoning') {
@@ -716,7 +716,8 @@ function main() {
     node.toggleAttribute('data-preview', !node.hasAttribute('data-expanded') && summary !== '')
   }
 
-  function createThink(node) {
+  function createThink(node, options = {}) {
+    const iconMarkup = options.iconMarkup ?? THINK
     node.dataset.variant = 'think'
     const status = document.createElement('span')
     status.className = 'visually-hidden'
@@ -731,7 +732,7 @@ function main() {
     leading.className = 'think-leading'
     const idle = document.createElement('span')
     idle.className = 'think-icon-idle'
-    idle.append(icon(THINK))
+    idle.append(icon(iconMarkup))
     const hover = document.createElement('span')
     hover.className = 'think-chevron-hover'
     hover.append(icon(CHEVRON_DOWN))
@@ -741,7 +742,7 @@ function main() {
     leading.append(idle, hover, openChevron)
     const title = document.createElement('span')
     title.className = 'think-title'
-    title.textContent = messages.think
+    title.textContent = options.title ?? messages.think
     const separator = document.createElement('span')
     separator.className = 'think-separator'
     separator.setAttribute('aria-hidden', 'true')
@@ -755,6 +756,12 @@ function main() {
     body.className = 'think-body'
     disclosure.append(row, body)
     node.append(status, disclosure)
+    // A notice card ships settled: its one-line summary and body are filled here.
+    if (options.summary !== undefined) {
+      summaryText.textContent = options.summary
+      node.dataset.preview = 'true'
+    }
+    if (options.body !== undefined) renderMarkdownBody(body, options.body, { compact: true })
     const toggle = () => {
       const open = !node.hasAttribute('data-expanded')
       node.toggleAttribute('data-expanded', open)
@@ -1463,6 +1470,11 @@ function main() {
     }
   }
 
+  /** The notice card's one-line summary: its first non-empty line. */
+  function noticeSummary(text) {
+    return String(text).split('\n').find((line) => line.trim() !== '') ?? ''
+  }
+
   function upsertBlock(block) {
     if (typeof block?.key !== 'string' || typeof block.text !== 'string') return
     blockData.set(block.key, block)
@@ -1479,14 +1491,16 @@ function main() {
         actions.append(messageCopyButton(() => bubble.textContent ?? ''))
         node.append(bubble, actions)
       } else if (block.kind === 'notice') {
-        node = document.createElement('div')
-        node.className = 'notice-row'
+        node = document.createElement('article')
+        node.className = 'block'
         node.dataset.kind = 'notice'
-        const label = document.createElement('span')
-        label.className = 'notice-label'
-        const bubble = document.createElement('div')
-        bubble.className = 'notice-bubble'
-        node.append(label, bubble)
+        // Folded like the main window's process cards: one summary line until clicked.
+        createThink(node, {
+          iconMarkup: SPARKLE,
+          title: messages.noticeTitle,
+          summary: noticeSummary(block.text),
+          body: block.text,
+        })
       } else if (block.kind === 'assistant') {
         node = document.createElement('article')
         node.className = 'block'
@@ -1524,8 +1538,7 @@ function main() {
     if (block.kind === 'user') {
       node.querySelector('.user-bubble').textContent = block.text
     } else if (block.kind === 'notice') {
-      node.querySelector('.notice-label').textContent = messages.noticeTitle
-      node.querySelector('.notice-bubble').textContent = block.text
+      // Settled at creation; nothing per-update.
     } else if (block.kind === 'reasoning') {
       const summary = reasoningSummary(block.text, block.running === true)
       node.querySelector('.think-summary-text').textContent = summary
