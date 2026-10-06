@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { ProfileStore } from '../src/preferences.ts'
-import { AUTO_CHECK_INTERVAL_MS, compareVersions, installSpec, ownPackage, registryTarballUrl, releaseTarballUrl, UpdateChecker, versionFromRegistry, versionFromRelease } from '../src/update.ts'
+import { AUTO_CHECK_INTERVAL_MS, compareVersions, installSpec, ownPackage, registryTarballUrl, releaseTarballUrl, UpdateChecker, versionFromRegistry, versionFromRelease, withReleaseAgeExclusion } from '../src/update.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'orb-update-'))
 after(() => { rmSync(root, { recursive: true, force: true }) })
@@ -109,6 +109,47 @@ describe('update versions', () => {
     process.env.DSH_ORB_UPDATE_URL = 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz'
     assert.equal(releaseTarballUrl('0.2.0'), 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz')
     delete process.env.DSH_ORB_UPDATE_URL
+  })
+})
+
+describe('release-age exemption', () => {
+  it('appends the entry to an existing exclude list', () => {
+    const before = 'packages:\n  - .\n\nnodeLinker: hoisted\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n'
+    assert.equal(
+      withReleaseAgeExclusion(before, 'dsh-orb', '0.1.2'),
+      'packages:\n  - .\n\nnodeLinker: hoisted\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb@0.1.2\n',
+    )
+  })
+
+  it('adds the key when the file has none', () => {
+    assert.equal(
+      withReleaseAgeExclusion('packages:\n  - .\n', 'dsh-orb', '0.1.2'),
+      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.2\n',
+    )
+  })
+
+  it('keeps quiet when the version or the whole package is already exempt', () => {
+    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb@0.1.2\n', 'dsh-orb', '0.1.2'), undefined)
+    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb\n', 'dsh-orb', '0.1.2'), undefined)
+  })
+
+  it('leaves an unfamiliar file shape alone', () => {
+    assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude: [dsh-orb]\n', 'dsh-orb', '0.1.2'), undefined)
+  })
+
+  it('writes the exemption into the profile before installing', async () => {
+    const profile = store()
+    writeFileSync(
+      join(profile.dir, 'pnpm-workspace.yaml'),
+      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n',
+    )
+    const { update } = checker({ store: profile, latest: '0.2.0' })
+    await update.check()
+    await update.install()
+    assert.equal(
+      readFileSync(join(profile.dir, 'pnpm-workspace.yaml'), 'utf8'),
+      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb@0.2.0\n',
+    )
   })
 })
 
@@ -390,6 +431,24 @@ describe('update checker', () => {
     await blocked.update.install()
     assert.equal(blocked.update.state().error, 'build-blocked')
     assert.deepEqual(blocked.update.state().pendingBuilds, ['koffi'])
+
+    const diagnosed = checker({
+      store: profile,
+      latest: '0.2.0',
+      result: {
+        application: 'failed',
+        error: {
+          diagnostic: 'ERR_PNPM_NO_MATURE_MATCHING_VERSION: 1 version does not meet the minimumReleaseAge constraint\ndetail below',
+        },
+      },
+    })
+    await diagnosed.update.check()
+    await diagnosed.update.install()
+    assert.equal(
+      diagnosed.update.state().error,
+      'ERR_PNPM_NO_MATURE_MATCHING_VERSION: 1 version does not meet the minimumReleaseAge constraint',
+      'a codeless pnpm failure keeps its first diagnostic line',
+    )
   })
 
   it('keeps working without the official plugin manager', async () => {

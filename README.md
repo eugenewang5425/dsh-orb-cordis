@@ -82,18 +82,24 @@ Helper (its own downloaded Electron, isolated userData)
 
 ### From a release
 
-Releases are distributed through GitHub Releases, not npm. The install unit is the release tarball — **not the repository itself**: pasting the repo URL into a plugin page installs the monorepo root package, which fails with "this package declares no bundle".
+Releases are published to the npm registry and served from npmmirror. The install unit is the release tarball — **not the repository itself**: pasting the repo URL into a plugin page installs the monorepo root package, which fails with "this package declares no bundle".
 
-- **Desktop app**: open the [Releases page](https://github.com/mini-yifan/dsh-orb-cordis/releases/latest), copy the address of the latest `dsh-orb-x.y.z.tgz` and paste it into the app's plugin page; or download the tgz and add that file instead.
-- **CLI** (`dsh web`):
+- **By name** — add `dsh-orb` in the desktop app's plugin page, or:
 
   ```sh
-  dsh plugin add https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v0.1.0/dsh-orb-0.1.0.tgz
+  dsh plugin add dsh-orb
   ```
 
-With an older version installed there is no need to reinstall: the floating-ball card in the main window's settings page checks for and installs updates.
+- **By tarball URL** — `https://registry.npmmirror.com/dsh-orb/-/dsh-orb-<version>.tgz` (npmjs mirror: `https://registry.npmjs.org/dsh-orb/-/dsh-orb-<version>.tgz`).
 
-The tarball address follows the version: `https://github.com/mini-yifan/dsh-orb-cordis/releases/download/plugin-v<version>/dsh-orb-<version>.tgz`.
+**A just-published version can resolve to the previous one for up to 24 hours.** The official client bundles pnpm 11, whose `minimumReleaseAge` default (1440 minutes) makes a named install settle for the newest version published more than 24 hours ago — a supply-chain guard, not a network problem. To get a fresh release immediately, install its tarball URL (above), or exempt the package in the profile's `pnpm-workspace.yaml`:
+
+```yaml
+minimumReleaseAgeExclude:
+  - dsh-orb
+```
+
+With an older version installed there is no need to reinstall: the floating-ball card in the main window's settings page checks for and installs updates, and records the exemption itself.
 
 ### From a local build
 

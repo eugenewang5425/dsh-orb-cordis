@@ -8,7 +8,8 @@
  */
 
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { ProfileStore } from './preferences.ts'
 
 /** The GitHub repository that publishes plugin releases, `plugin-v<version>` tags. */
@@ -256,12 +257,17 @@ export class UpdateChecker {
     this.error = null
     this.pendingBuilds = []
     try {
+      exemptReleaseAge(this.store.dir, this.own.name, version)
       const result = await manager.installBundle(installSpec(version, this.source, this.own.name), {
         requestId: `dsh-orb-update-${Date.now()}`,
         ...approvedBuilds === undefined ? {} : { approvedBuilds },
       })
       if (result.application === 'failed') {
-        this.error = result.error?.code ?? 'operation-error'
+        // pnpm failures (e.g. its release-age gate) arrive as a diagnostic blob,
+        // not a code; keep the first line so the card is not just "operation-error".
+        const diagnostic = result.error?.diagnostic?.split('\n')[0]?.trim()
+        this.error = result.error?.code
+          ?? (diagnostic === undefined || diagnostic === '' ? 'operation-error' : diagnostic.slice(0, 200))
         this.pendingBuilds = result.pendingBuilds === undefined ? [] : [...result.pendingBuilds]
         if (this.pendingBuilds.length > 0) this.error = 'build-blocked'
         return
@@ -373,6 +379,61 @@ export function installSpec(version: string, source: string | undefined, name: s
   if (overridden !== undefined && overridden !== '') return overridden
   if (source !== undefined) return registryTarballUrl(source, name, version)
   return releaseTarballUrl(version)
+}
+
+/**
+ * Record the version being installed as an explicit exemption from pnpm's
+ * minimum-release-age gate. pnpm v11 defaults `minimumReleaseAge` to 24 hours,
+ * so a registry-named resolution silently settles for an older version while a
+ * fresh release waits out the cutoff (observed 2026-10-06: `dsh-orb` resolved
+ * to 0.1.1 everywhere the hour after 0.1.2 shipped). pnpm records such an
+ * exemption itself for explicit installs; when the manager's pipeline does not,
+ * the update writes it first. Best-effort: an unreadable or unexpected file
+ * skips the write, and the install proceeds on pnpm's own defaults.
+ */
+function exemptReleaseAge(profileDir: string, name: string, version: string): void {
+  try {
+    const file = join(profileDir, 'pnpm-workspace.yaml')
+    const next = withReleaseAgeExclusion(readFileSync(file, 'utf8'), name, version)
+    if (next !== undefined) writeFileSync(file, next)
+  } catch {
+    // No workspace file (dev checkout, older profile): nothing to exempt.
+  }
+}
+
+/**
+ * Append `name@version` to the profile's `minimumReleaseAgeExclude` list.
+ * Returns the new text, or undefined when the entry is already covered
+ * (bare name or exact version) or the file is not the block list pnpm writes.
+ */
+export function withReleaseAgeExclusion(text: string, name: string, version: string): string | undefined {
+  if (name === '' || version === '') return undefined
+  const wanted = `${name}@${version}`
+  const lines = text.split('\n')
+  let key = -1
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+    if (line === 'minimumReleaseAgeExclude:') {
+      key = index
+      break
+    }
+    // Inline arrays and shorthand are not pnpm's own output: leave them alone.
+    if (/^minimumReleaseAgeExclude\s*:/.test(line)) return undefined
+  }
+  if (key === -1) {
+    const head = text === '' || text.endsWith('\n') ? text : `${text}\n`
+    return `${head}minimumReleaseAgeExclude:\n  - ${wanted}\n`
+  }
+  let last = key
+  for (let index = key + 1; index < lines.length; index += 1) {
+    const line = lines[index] ?? ''
+    if (!/^[ \t]+-[ \t]+\S/.test(line)) break
+    const entry = line.slice(line.indexOf('-') + 1).trim().replace(/^['"]|['"]$/g, '')
+    if (entry === name || entry === wanted) return undefined
+    last = index
+  }
+  lines.splice(last + 1, 0, `  - ${wanted}`)
+  return lines.join('\n')
 }
 
 /** The version a release names: `plugin-v0.2.0` → `0.2.0`. */
