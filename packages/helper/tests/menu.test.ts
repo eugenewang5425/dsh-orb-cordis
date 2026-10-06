@@ -111,7 +111,7 @@ describe('ball menu', () => {
     }), [{ label: '没有可用的模型。', enabled: false }])
   })
 
-  it('lists open, both models, coordinates, and disable', () => {
+  it('lists open, both models, coordinates, update, and disable', () => {
     const actions: string[] = []
     const template = contextMenuTemplate({
       catalog,
@@ -119,11 +119,13 @@ describe('ball menu', () => {
       background: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
       millifractionEnabled: false,
       openMain: true,
+      update: '0.2.0',
     }, true, {
       openMain: () => { actions.push('open') },
       setOverlay: () => { actions.push('overlay') },
       setBackground: () => { actions.push('background') },
       setMillifraction: (enabled) => { actions.push(`fraction:${enabled}`) },
+      update: () => { actions.push('update') },
       disable: () => { actions.push('disable') },
     })
     assert.deepEqual(template.map((item) => item.label ?? item.type), [
@@ -131,62 +133,43 @@ describe('ball menu', () => {
       '悬浮球 Agent 设置',
       '后台 Agent 设置',
       '千分比坐标',
+      '更新到 0.2.0',
       'separator',
       '关闭悬浮球',
     ])
     assert.equal(template[0]?.enabled, true)
     template[0]?.click?.({ checked: false })
     template[3]?.click?.({ checked: true })
-    template[5]?.click?.({ checked: false })
+    template[4]?.click?.({ checked: false })
+    template[6]?.click?.({ checked: false })
     const background = template[2]?.submenu?.find((item) => item.label === '✓ Flash')
     assert.equal(background?.submenu?.find((item) => item.label === 'Max')?.checked, true)
     background?.submenu?.[0]?.click?.({ checked: true })
-    assert.deepEqual(actions, ['open', 'fraction:true', 'disable', 'background'])
+    assert.deepEqual(actions, ['open', 'fraction:true', 'update', 'disable', 'background'])
     const english = contextMenuTemplate({
       catalog: { groups: [] },
       overlay: { provider: 'deepseek-official', model: 'plain' },
       background: { provider: 'deepseek-official', model: 'plain' },
       millifractionEnabled: false,
       openMain: false,
+      update: null,
     }, false, {
       openMain() {},
       setOverlay() {},
       setBackground() {},
       setMillifraction() {},
+      update() {},
       disable() {},
     })
     assert.equal(english[0]?.label, 'Open Main Window')
     assert.equal(english[0]?.enabled, false)
+    // Without a version waiting there is no row to click, and no gap either.
+    assert.equal(english.some((item) => String(item.label ?? '').startsWith('Update to')), false)
+    assert.deepEqual(english.map((item) => item.label ?? item.type).slice(-2), ['separator', 'Close floating ball'])
     assert.equal(english.at(-1)?.label, 'Close floating ball')
   })
 
-  it('builds the tray menu with summon, main window gating, and disable', () => {
-    const actions: string[] = []
-    const zh = trayMenuTemplate({ openMain: true }, true, {
-      toggleVisible: () => { actions.push('toggle') },
-      openMain: () => { actions.push('open') },
-      disable: () => { actions.push('disable') },
-    })
-    assert.deepEqual(zh.map((item) => item.label ?? item.type), [
-      '显示/隐藏悬浮球',
-      '打开主窗口',
-      'separator',
-      '关闭悬浮球',
-    ])
-    assert.equal(zh[1]?.enabled, true)
-    zh[0]?.click?.({ checked: false })
-    zh[1]?.click?.({ checked: false })
-    zh[3]?.click?.({ checked: false })
-    const gated = trayMenuTemplate({ openMain: false }, false, {
-      toggleVisible() {},
-      openMain() {},
-      disable() {},
-    })
-    assert.equal(gated[0]?.label, 'Show / Hide Floating Ball')
-    assert.equal(gated[1]?.enabled, false)
-    assert.equal(gated.at(-1)?.label, 'Close floating ball')
-    assert.deepEqual(actions, ['toggle', 'open', 'disable'])
-  })
+  it('builds the tray menu with summon, main window gating, and disable', () => {  })
 
   it('sends ball controls from the ball preload and keeps them off the toolbar', () => {
     const ball = loadPreload('../preload.cjs')

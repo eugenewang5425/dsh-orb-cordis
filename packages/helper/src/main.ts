@@ -8,7 +8,7 @@ import { createConnection, type Socket } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import { readAvatarChoice, type AvatarChoice } from './avatar.ts'
 import { collectChromeWindowIds, type NativeHandleWindow } from './chrome-windows.ts'
-import { FloatingPlacement, initialWindowBounds } from './geometry.ts'
+import { AGENT_STRIP_WIDTH, FloatingPlacement, initialWindowBounds } from './geometry.ts'
 import { contextMenuTemplate, trayMenuTemplate } from './menu.ts'
 import { attachOverlays, denyWindowPermissions } from './overlays.ts'
 import { type MenuCatalog, type MenuSelection } from './model-menu.ts'
@@ -31,6 +31,8 @@ interface ChromeState {
   millifractionEnabled: boolean
   openMain: boolean
   catalog: MenuCatalog
+  /** Newer published version the host found, or null when there is nothing to install. */
+  update: string | null
 }
 
 const defaultSelection: MenuSelection = {
@@ -45,6 +47,7 @@ let chrome: ChromeState = {
   millifractionEnabled: false,
   openMain: false,
   catalog: { groups: [] },
+  update: null,
 }
 let avatarToken = 0
 // Raw preferences as stored; `theme` resolves through nativeTheme, an absent
@@ -72,6 +75,8 @@ let live: Socket | undefined
 let quitting = false
 let buffer = ''
 let tray: InstanceType<typeof Tray> | undefined
+/** Last bookmark payload, re-sent when the page reloads without a socket reconnect. */
+let lastAgentItems: unknown[] = []
 
 app.on('before-quit', () => {
   quitting = true
@@ -96,8 +101,11 @@ void app.whenReady().then(async () => {
   }, () => screen.getAllDisplays().map((display) => display.bounds))
   win.webContents.on('did-finish-load', () => {
     if (win && !win.isVisible()) win.showInactive()
-    // The page may have loaded after the last appearance change.
+    // The page may have loaded after the last appearance or bookmark change.
     pushAppearance()
+    if (win && !win.isDestroyed() && lastAgentItems.length > 0) {
+      win.webContents.send('orb:agents', lastAgentItems)
+    }
   })
   // OS scheme flips ride through while the theme preference is `system`.
   nativeTheme.on('updated', () => { pushAppearance() })
@@ -114,7 +122,7 @@ void app.whenReady().then(async () => {
 
 ipcMain.handle('orb:expand', (event, expanded) => {
   if (!fromBall(event) || !placement || typeof expanded !== 'boolean') {
-    return { expanded: false, horizontal: 'left', vertical: 'up', docked: undefined }
+    return { expanded: false, horizontal: 'left', vertical: 'up', docked: undefined, strip: 0 }
   }
   return placement.setExpanded(expanded)
 })
@@ -124,9 +132,12 @@ ipcMain.handle('orb:move', (event, request) => {
   return placement.move(request.x, request.y, request.canDock)
 })
 
-ipcMain.handle('orb:clamp', async (event, canDock) => {
+ipcMain.handle('orb:clamp', async (event, payload) => {
   if (!fromBall(event) || !placement) return { docked: undefined }
-  return placement.clamp(canDock !== false)
+  const request = readClampRequest(payload)
+  const result = await placement.clamp(request.canDock, request.origin)
+  logOrbGeometry(result, request.origin)
+  return result
 })
 
 ipcMain.handle('orb:unsnap', async (event) => {
@@ -159,6 +170,11 @@ ipcMain.on('orb:history', (event) => {
 ipcMain.on('orb:open', (event, sessionId) => {
   if (!fromBall(event)) return
   if (typeof sessionId === 'string') write({ type: 'open', sessionId })
+})
+
+ipcMain.on('orb:agent-open', (event, sessionId) => {
+  if (!fromBall(event)) return
+  if (typeof sessionId === 'string') write({ type: 'agent-open', sessionId })
 })
 
 ipcMain.on('orb:new', (event) => {
@@ -343,6 +359,11 @@ function deliver(message: unknown): void {
     win.webContents.send('orb:status', (record as { text?: unknown }).text)
     return
   }
+  if (record.type === 'update') {
+    const text = updateStatusText(record as { state?: unknown; version?: unknown; reason?: unknown }, menuZh())
+    if (text !== '') win.webContents.send('orb:status', text)
+    return
+  }
   if (record.type === 'question') {
     win.webContents.send('orb:question', message)
     return
@@ -361,6 +382,13 @@ function deliver(message: unknown): void {
   }
   if (record.type === 'history') {
     win.webContents.send('orb:history', (record as { items?: unknown }).items)
+    return
+  }
+  if (record.type === 'agents') {
+    const items = (record as { items?: unknown }).items
+    lastAgentItems = Array.isArray(items) ? items : []
+    win.webContents.send('orb:agents', lastAgentItems)
+    applyStrip(lastAgentItems.length > 0)
     return
   }
   if (record.type === 'reset') {
@@ -393,6 +421,17 @@ function deliver(message: unknown): void {
 /** Ball plus overlays: the windows the host must skip when it picks an observation window. */
 function chromeWindowIds(): number[] {
   return collectChromeWindowIds([win, ...(overlays?.chromeWindows() ?? [])], process.platform)
+}
+
+/**
+ * The bookmark strip lives beside the panel inside one transparent window, so
+ * the window widens while bookmarks exist and shrinks back when they clear.
+ * The renderer learns the applied geometry through `orb:expand-state`.
+ */
+function applyStrip(present: boolean): void {
+  if (!placement) return
+  const state = placement.setStrip(present ? AGENT_STRIP_WIDTH : 0)
+  if (win && !win.isDestroyed()) win.webContents.send('orb:expand-state', state)
 }
 
 function fromBall(event: unknown): boolean {
@@ -435,6 +474,45 @@ function isMove(value: unknown): value is { x: number; y: number; canDock: boole
     && Number.isFinite(point.x) && Number.isFinite(point.y)
     && Math.abs(point.x) <= 100_000 && Math.abs(point.y) <= 100_000
     && typeof point.canDock === 'boolean'
+}
+
+/** Accepts the legacy bare `canDock` boolean and the `{ canDock, origin }` payload. */
+function readClampRequest(value: unknown): { canDock: boolean; origin?: { x: number; y: number } } {
+  if (typeof value === 'boolean') return { canDock: value }
+  if (typeof value !== 'object' || value === null) return { canDock: true }
+  const record = value as { canDock?: unknown; origin?: unknown }
+  const canDock = record.canDock !== false
+  const origin = isPoint(record.origin) ? { x: record.origin.x, y: record.origin.y } : undefined
+  return { canDock, origin }
+}
+
+function isPoint(value: unknown): value is { x: number; y: number } {
+  if (typeof value !== 'object' || value === null) return false
+  const point = value as { x?: unknown; y?: unknown }
+  return typeof point.x === 'number' && typeof point.y === 'number'
+    && Number.isFinite(point.x) && Number.isFinite(point.y)
+    && Math.abs(point.x) <= 100_000 && Math.abs(point.y) <= 100_000
+}
+
+/**
+ * One stderr line per drag release. Comparing `window` (setBounds/getBounds path)
+ * against `remote` (renderer drag coordinates) and each display's scaleFactor
+ * localizes Windows machines whose dock decision fails on per-display DPI drift.
+ */
+function logOrbGeometry(result: { docked?: 'left' | 'right' }, remoteOrigin?: { x: number; y: number }): void {
+  if (!win || win.isDestroyed()) return
+  const displays = screen.getAllDisplays().map((display) => ({
+    bounds: display.bounds,
+    workArea: display.workArea,
+    scaleFactor: display.scaleFactor,
+  }))
+  console.error(`[orb-geom] ${JSON.stringify({
+    electron: process.versions.electron,
+    window: win.getBounds(),
+    remote: remoteOrigin ?? null,
+    displays,
+    docked: result.docked ?? null,
+  })}`)
 }
 
 function zhLocale(): boolean {
@@ -527,6 +605,7 @@ function readChrome(value: unknown): ChromeState {
     background?: MenuSelection
     millifractionEnabled?: unknown
     openMain?: unknown
+    update?: unknown
     catalog?: MenuCatalog
   }
   return {
@@ -534,6 +613,7 @@ function readChrome(value: unknown): ChromeState {
     background: selectionOr(record.background, chrome.background),
     millifractionEnabled: record.millifractionEnabled === true,
     openMain: record.openMain === true,
+    update: typeof record.update === 'string' && record.update !== '' ? record.update : null,
     catalog: record.catalog ?? { groups: [] },
   }
 }
@@ -549,9 +629,39 @@ async function showMenu(window: BrowserWindow): Promise<void> {
     setOverlay: (selection) => { write({ type: 'set-overlay', selection }) },
     setBackground: (selection) => { write({ type: 'set-background', selection }) },
     setMillifraction: (enabled) => { void confirmMillifraction(window, enabled) },
+    update: () => { write({ type: 'update' }) },
     disable: () => { write({ type: 'disable' }) },
   })
   Menu.buildFromTemplate(template).popup({ window })
+}
+
+/** One line for the ball's status area: the update runs in the host, the ball only narrates it. */
+function updateStatusText(message: { state?: unknown; version?: unknown; reason?: unknown }, zh: boolean): string {
+  const version = typeof message.version === 'string' ? message.version : ''
+  if (message.state === 'available') {
+    return zh ? `发现新版本 ${version}，右键球可更新` : `Version ${version} is available — right-click the ball to update`
+  }
+  if (message.state === 'starting') {
+    return zh ? `正在更新到 ${version}…` : `Updating to ${version}…`
+  }
+  if (message.state === 'done') {
+    return zh ? `已更新到 ${version}，重启 DeepSeek Harness 后生效` : `Updated to ${version} — restart DeepSeek Harness to apply it`
+  }
+  if (message.state === 'failed') {
+    return zh ? `更新失败：${updateFailureText(message.reason, true)}` : `Update failed: ${updateFailureText(message.reason, false)}`
+  }
+  return ''
+}
+
+function updateFailureText(reason: unknown, zh: boolean): string {
+  if (reason === 'build-blocked') {
+    return zh ? '安装脚本未获授权，请在设置页允许后重试' : 'install scripts need approval — allow them in settings and retry'
+  }
+  if (reason === 'incompatible-version') {
+    return zh ? '当前 Harness 版本与新版不兼容' : 'the new version is incompatible with this Harness build'
+  }
+  if (typeof reason === 'string' && reason !== '') return reason
+  return zh ? '未知错误' : 'unknown error'
 }
 
 async function confirmMillifraction(window: BrowserWindow, enabled: boolean): Promise<void> {
