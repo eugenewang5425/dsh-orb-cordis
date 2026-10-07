@@ -40,6 +40,10 @@
       "types": "./dist/computer-use/code-agent.d.ts",
       "default": "./dist/computer-use/code-agent.js"
     },
+    "./computer-use/code-agent-registry": {
+      "types": "./dist/computer-use/code-agent-registry.d.ts",
+      "default": "./dist/computer-use/code-agent-registry.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
