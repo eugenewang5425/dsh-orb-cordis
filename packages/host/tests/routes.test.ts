@@ -85,6 +85,7 @@ describe('settings routes', () => {
       async setMillifractionEnabled(enabled) { store.setMillifractionEnabled(enabled) },
       async setObservationFrameEnabled(enabled) { store.setObservationFrameEnabled(enabled) },
       async setBallEnabled(enabled) { store.setBallEnabled(enabled) },
+      helperPhase: () => 'downloading',
       updateState: () => ({
         currentVersion: '0.1.0',
         installedVersion: '0.1.0',
@@ -151,12 +152,14 @@ describe('settings routes', () => {
     const snapshot = JSON.parse(settings.body.toString('utf8')) as {
       avatarUrl: string
       ballEnabled: boolean
+      helperPhase: string
       overlay: { model: string }
       supported: boolean
       permissionFallback: boolean
       update: { currentVersion: string; latestVersion: string; available: boolean; autoCheck: boolean }
     }
     assert.equal(settings.status, 200)
+    assert.equal(snapshot.helperPhase, 'downloading', 'the settings page can show the runtime wait')
     assert.equal(snapshot.avatarUrl, '/.dsh-orb/avatar?v=0')
     assert.equal(snapshot.avatarUrl.includes('token'), false)
     assert.equal(snapshot.ballEnabled, true)

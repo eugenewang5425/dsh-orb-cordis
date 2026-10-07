@@ -47,6 +47,7 @@ window.__ModuleLoader__.load({
       frameTitle: '观察框彩带',
       frameDescription: 'Computer Use 操作某个窗口时，窗口周围显示这条彩带。关闭后不再显示。',
       frameToggle: '显示观察框彩带',
+      runtimePreparing: '正在准备悬浮球：首次使用需要下载约 124–150 MB 的运行时，完成后悬浮球会自动出现。',
       tccTitle: 'Mac 权限',
       tccDescription: 'Computer Use 需要屏幕录制与辅助功能。点按钮打开系统设置对应页。',
       tccAppHint: '在列表里打开 {name}。',
@@ -119,6 +120,7 @@ window.__ModuleLoader__.load({
       frameTitle: 'Observation ribbon',
       frameDescription: 'Draws the coloured ribbon around the window Computer Use is working on. Turn it off to hide it.',
       frameToggle: 'Show the observation ribbon',
+      runtimePreparing: 'Preparing the floating ball: the first launch downloads a ~124–150 MB runtime, then the ball appears on its own.',
       tccTitle: 'Mac permissions',
       tccDescription: 'Computer Use needs Screen Recording and Accessibility. Each button opens that System Settings pane.',
       tccAppHint: 'In the list, turn on {name}.',
@@ -313,6 +315,24 @@ window.__ModuleLoader__.load({
         return () => { clearInterval(timer) }
       }, [installing])
 
+      // The first launch prepares the helper runtime inside the host; poll until
+      // the ball lands or the failure surfaces, so the waiting line tracks it.
+      const preparing = typeof state.snapshot?.helperPhase === 'string' && state.snapshot.helperPhase !== ''
+      React.useEffect(() => {
+        if (!preparing) return undefined
+        const timer = setInterval(() => { void refreshSettings() }, 2000)
+        return () => { clearInterval(timer) }
+      }, [preparing])
+
+      async function refreshSettings() {
+        try {
+          const snapshot = await request('/.dsh-orb/settings')
+          setState((prev) => prev.snapshot ? { ...prev, snapshot } : prev)
+        } catch {
+          // Keep the last known state; the next poll or a page reload tries again.
+        }
+      }
+
       async function refreshUpdate() {
         try {
           const update = await request('/.dsh-orb/update')
@@ -366,7 +386,7 @@ window.__ModuleLoader__.load({
           ? h('p', { className: 'dsh-orb-set-error', role: 'alert' }, `${text.saveError} ${state.error}`)
           : null,
         snap.supported ? null : h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.linux),
-        helperNotice(text, snap),
+        helperNotice(text, snap, disabled, mutate),
         snap.permissionFallback === true
           ? h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.permissionFallback)
           : null,
@@ -449,12 +469,31 @@ window.__ModuleLoader__.load({
           snap.tcc && snap.tcc.applicable ? tccCard(text, snap, disabled, mutate) : null))
     }
 
-    function helperNotice(text, snap) {
+    /**
+     * Why the ball is not on screen yet: preparing (first-launch runtime), or
+     * failed with a retry. Nothing shows while a ball is up or the ball is off.
+     */
+    function helperNotice(text, snap, disabled, mutate) {
+      if (snap.ballEnabled === false) return null
+      const retry = () => {
+        // POST the toggle's own value: the host restarts the helper and grants
+        // a fresh download budget.
+        void mutate('/.dsh-orb/ball', { enabled: true })
+      }
       if (snap.helperError === 'helper-exited') {
-        return h('p', { className: 'dsh-orb-set-error', role: 'alert' }, text.helperFailed)
+        return h('div', { className: 'dsh-orb-set-banner' },
+          h('p', { className: 'dsh-orb-set-error', role: 'alert' }, text.helperFailed),
+          h('div', { className: 'dsh-orb-set-actions' },
+            h('button', { type: 'button', className: 'dsh-orb-set-button dsh-orb-set-ghost', disabled, onClick: retry }, text.retry)))
       }
       if (snap.helperError === 'runtime-download') {
-        return h('p', { className: 'dsh-orb-set-error', role: 'alert' }, text.runtimeFailed)
+        return h('div', { className: 'dsh-orb-set-banner' },
+          h('p', { className: 'dsh-orb-set-error', role: 'alert' }, text.runtimeFailed),
+          h('div', { className: 'dsh-orb-set-actions' },
+            h('button', { type: 'button', className: 'dsh-orb-set-button dsh-orb-set-ghost', disabled, onClick: retry }, text.retry)))
+      }
+      if (typeof snap.helperPhase === 'string' && snap.helperPhase !== '') {
+        return h('p', { className: 'dsh-orb-set-banner', role: 'status' }, text.runtimePreparing)
       }
       return null
     }

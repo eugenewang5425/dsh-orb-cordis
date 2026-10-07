@@ -22,6 +22,8 @@ function loadSection() {
   const snapshot = {
     supported: true,
     ballEnabled: true,
+    helperError: '',
+    helperPhase: '',
     avatarUrl: '/.dsh-orb/avatar?v=0',
     avatarPresetId: null,
     avatarPresets: AVATAR_PRESETS.map((preset) => ({ id: preset.id, url: `/.dsh-orb/avatar/preset/${preset.id}` })),
@@ -177,6 +179,7 @@ function loadSection() {
   return {
     calls,
     spec: registered.spec,
+    snapshot,
     render,
     flush,
     /** Re-render the page, then run every registered interval once (timers persist). */
@@ -324,6 +327,34 @@ describe('settings section', () => {
     assert.equal(client.includes('划词'), false)
     assert.equal(client.includes('selectionToggle'), false)
     assert.equal(client.includes('authenticatedUrl'), false)
+  })
+
+  it('explains the first-launch runtime wait and offers a retry when it failed', async () => {
+    const page = loadSection()
+    page.snapshot.helperPhase = 'downloading'
+    let view = page.render()
+    await page.flush()
+    view = page.render()
+    assert.equal(
+      find(view, (node) => node.children?.includes('正在准备悬浮球：首次使用需要下载约 124–150 MB 的运行时，完成后悬浮球会自动出现。')).length,
+      1,
+      'the waiting line tells the user the ball is being prepared',
+    )
+
+    page.snapshot.helperPhase = ''
+    page.snapshot.helperError = 'runtime-download'
+    await page.tick()
+    view = page.render()
+    assert.equal(find(view, (node) => node.children?.includes('悬浮球运行时没有下载成功。关闭后再打开可再试一次。')).length, 1)
+    const retry = find(view, (node) => node.type === 'button' && node.children?.includes('重试'))[0]
+    assert.ok(retry, 'the failure line carries a retry button')
+    retry.props.onClick()
+    await settle()
+    const call = page.calls.at(-1)
+    assert.equal(call.path, '/.dsh-orb/ball')
+    assert.equal(JSON.parse(call.options.body).enabled, true, 'retry asks the host to start the ball again')
+
+    page.snapshot.helperError = ''
   })
 
   it('follows the main window locale on <html lang>', () => {

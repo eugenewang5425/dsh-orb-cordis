@@ -52,6 +52,8 @@ export interface OrbControl {
   setObservationFrameEnabled(enabled: boolean): Promise<void>
   setBallEnabled(enabled: boolean): Promise<void>
   helperStatus?(): string
+  /** 'downloading'/'extracting' while the helper runtime is prepared; '' otherwise. */
+  helperPhase?(): string
   /** The pending ball-initiated jump target, or null once consumed or expired. */
   takeJump(): { sessionId: string; at: number } | null
   /** Consumes the jump target armed by a matching bookmark click. */
@@ -291,6 +293,7 @@ async function snapshot(deps: RouteDeps): Promise<{
   observationFrameEnabled: boolean
   tcc: TccStatus
   helperError: string
+  helperPhase: string
   selectionAvailable: boolean
   permissionFallback: boolean
   update: UpdateState
@@ -313,6 +316,7 @@ async function snapshot(deps: RouteDeps): Promise<{
     observationFrameEnabled: deps.store.observationFrameEnabled(),
     tcc: deps.tcc.status(),
     helperError: deps.control.helperStatus?.() ?? '',
+    helperPhase: deps.control.helperPhase?.() ?? '',
     selectionAvailable: selectionRuntimeAvailable(),
     permissionFallback: deps.store.permissionFallback(),
     update: deps.control.updateState(),
