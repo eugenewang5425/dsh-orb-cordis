@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { ProfileStore } from '../src/preferences.ts'
-import { AUTO_CHECK_INTERVAL_MS, compareVersions, installRegistry, installSpec, ownPackage, registryTarballUrl, releaseTarballUrl, UpdateChecker, versionFromRegistry, versionFromRelease, withReleaseAgeExclusion } from '../src/update.ts'
+import { AUTO_CHECK_INTERVAL_MS, compareVersions, exemptReleaseAge, installRegistry, installSpec, ownPackage, registryTarballUrl, releaseTarballUrl, UpdateChecker, versionFromRegistry, versionFromRelease, withReleaseAgeExclusion } from '../src/update.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'orb-update-'))
 after(() => { rmSync(root, { recursive: true, force: true }) })
@@ -116,11 +116,11 @@ describe('update versions', () => {
 })
 
 describe('release-age exemption', () => {
-  it('appends the bare name to an existing exclude list', () => {
+  it('replaces a versioned rule with the bare name, written first', () => {
     const before = 'packages:\n  - .\n\nnodeLinker: hoisted\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n'
     assert.equal(
       withReleaseAgeExclusion(before, 'dsh-orb'),
-      'packages:\n  - .\n\nnodeLinker: hoisted\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb\n',
+      'packages:\n  - .\n\nnodeLinker: hoisted\nminimumReleaseAgeExclude:\n  - dsh-orb\n',
     )
   })
 
@@ -136,10 +136,36 @@ describe('release-age exemption', () => {
     assert.equal(withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb\n  - other\n', 'dsh-orb'), undefined)
   })
 
+  it('collapses every rule a profile collected for one package into the first bare name', () => {
+    // The shape pnpm leaves behind: it appends one `name@version` rule per young
+    // release, and reads only the first rule per name, so the bare entry in the
+    // middle exempts nothing (pnpm #732) — which is what blocked uninstalls.
+    const before =
+      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb@0.1.2\n  - dsh-orb\n  - dsh-orb@0.1.4\n  - dsh-orb@0.1.3\n  - other@1.0.0 || 2.0.0\n'
+    assert.equal(
+      withReleaseAgeExclusion(before, 'dsh-orb'),
+      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb\n  - other@1.0.0 || 2.0.0\n',
+    )
+  })
+
+  it('drops a rule pnpm appends behind the bare name', () => {
+    assert.equal(
+      withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb\n  - dsh-orb@0.1.4\n', 'dsh-orb'),
+      'minimumReleaseAgeExclude:\n  - dsh-orb\n',
+    )
+  })
+
+  it('quotes a scoped name and leaves other entries untouched', () => {
+    assert.equal(
+      withReleaseAgeExclusion('minimumReleaseAgeExclude:\n\t- other\n', '@scope/orb'),
+      "minimumReleaseAgeExclude:\n\t- '@scope/orb'\n\t- other\n",
+    )
+  })
+
   it('adds the bare name even when only versioned entries exist', () => {
     assert.equal(
       withReleaseAgeExclusion('minimumReleaseAgeExclude:\n  - dsh-orb@0.1.2\n', 'dsh-orb'),
-      'minimumReleaseAgeExclude:\n  - dsh-orb@0.1.2\n  - dsh-orb\n',
+      'minimumReleaseAgeExclude:\n  - dsh-orb\n',
     )
   })
 
@@ -158,8 +184,28 @@ describe('release-age exemption', () => {
     await update.install()
     assert.equal(
       readFileSync(join(profile.dir, 'pnpm-workspace.yaml'), 'utf8'),
-      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.0\n  - dsh-orb\n',
+      'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb\n',
     )
+  })
+
+  it('repairs the profile at start, whatever route installed the version', () => {
+    const profile = store()
+    // What the market's or the plugin manager's own `pnpm add` leaves behind:
+    // pnpm's appended rule sits behind the first rule, which keeps governing.
+    const broken = 'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb@0.1.4\n  - dsh-orb@0.1.5\n'
+    writeFileSync(join(profile.dir, 'pnpm-workspace.yaml'), broken)
+    exemptReleaseAge(profile.dir, 'dsh-orb')
+    const repaired = 'packages:\n  - .\nminimumReleaseAgeExclude:\n  - dsh-orb\n'
+    assert.equal(readFileSync(join(profile.dir, 'pnpm-workspace.yaml'), 'utf8'), repaired)
+    // Idempotent: starting again changes nothing.
+    exemptReleaseAge(profile.dir, 'dsh-orb')
+    assert.equal(readFileSync(join(profile.dir, 'pnpm-workspace.yaml'), 'utf8'), repaired)
+  })
+
+  it('leaves a profile without a workspace file alone', () => {
+    const profile = store()
+    exemptReleaseAge(profile.dir, 'dsh-orb')
+    assert.equal(existsSync(join(profile.dir, 'pnpm-workspace.yaml')), false)
   })
 })
 
