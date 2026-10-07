@@ -2,9 +2,10 @@
  * Update check and one-click upgrade for the installed bundle.
  * The check probes the package registries — npmmirror first: it mirrors npmjs
  * and answers where GitHub stalls — and falls back to the repository's GitHub
- * Releases when no registry knows the package. The upgrade installs the
- * version's tarball through the official plugin manager, served by the same
- * source that answered the check.
+ * Releases when no registry knows the package. The upgrade installs
+ * `name@version` through the official plugin manager, asking the registry that
+ * answered the check first. A bare tarball URL is not an install spec: pnpm
+ * 11.7 records it without `integrity` and refuses it before downloading.
  */
 
 import { spawn } from 'node:child_process'
@@ -71,6 +72,8 @@ export interface PluginManager {
     enabled?: boolean
     requestId?: string
     approvedBuilds?: string[]
+    /** Registry asked first. The manager keeps its own fallbacks when this one is among them. */
+    registry?: string
   }): Promise<InstallResult>
 }
 
@@ -244,10 +247,12 @@ export class UpdateChecker {
   }
 
   /**
-   * Install the version the check found through the official plugin manager,
-   * from the release tarball the version names. The manager owns the profile
-   * lock, the download and the manifest restore; an already-installed bundle is
-   * replaced and the result says the restart carries the new code.
+   * Install the version the check found through the official plugin manager.
+   * The spec is `name@version` and the registry is the one that answered the
+   * check, so pnpm resolves registry metadata — including `dist.integrity` —
+   * instead of a bare tarball URL. The manager owns the profile lock, the
+   * download and the manifest restore; an already-installed bundle is replaced
+   * and the result says the restart carries the new code.
    */
   async install(approvedBuilds?: string[]): Promise<void> {
     const version = this.availableVersion()
@@ -258,16 +263,13 @@ export class UpdateChecker {
     this.pendingBuilds = []
     try {
       exemptReleaseAge(this.store.dir, this.own.name)
-      const result = await manager.installBundle(installSpec(version, this.source, this.own.name), {
+      const result = await manager.installBundle(installSpec(version, this.own.name), {
         requestId: `dsh-orb-update-${Date.now()}`,
+        registry: installRegistry(this.source),
         ...approvedBuilds === undefined ? {} : { approvedBuilds },
       })
       if (result.application === 'failed') {
-        // pnpm failures (e.g. its release-age gate) arrive as a diagnostic blob,
-        // not a code; keep the first line so the card is not just "operation-error".
-        const diagnostic = result.error?.diagnostic?.split('\n')[0]?.trim()
-        this.error = result.error?.code
-          ?? (diagnostic === undefined || diagnostic === '' ? 'operation-error' : diagnostic.slice(0, 200))
+        this.error = reportedInstallError(result.error)
         this.pendingBuilds = result.pendingBuilds === undefined ? [] : [...result.pendingBuilds]
         if (this.pendingBuilds.length > 0) this.error = 'build-blocked'
         return
@@ -369,21 +371,42 @@ export function registryTarballUrl(base: string, name: string, version: string):
 }
 
 /**
- * The spec the installer receives: the `DSH_ORB_UPDATE_URL` override wins, then
- * the tarball of the source that answered the check — a registry tarball is a
- * plain https file, the same shape the manager already fetches from GitHub
- * Releases — else the GitHub release tarball.
+ * The spec the installer receives.
+ * `name@version` makes pnpm read `dist.integrity` from registry metadata.
+ * pnpm 11.7 (the version the official client bundles) rejects a bare tarball
+ * URL whose lockfile entry has no integrity, before it downloads the file
+ * (`ERR_PNPM_MISSING_TARBALL_INTEGRITY`). `DSH_ORB_UPDATE_URL` overrides the
+ * whole spec (tests, staged releases).
  */
-export function installSpec(version: string, source: string | undefined, name: string): string {
+export function installSpec(version: string, name: string): string {
   const overridden = process.env.DSH_ORB_UPDATE_URL?.trim()
   if (overridden !== undefined && overridden !== '') return overridden
-  // Releases ship through the registries. An unknown source (the check has not
-  // answered in this process yet) still installs from the primary mirror: the
-  // repository's GitHub releases are dormant, so no release tarball exists to
-  // fetch, and the GitHub address only yields a TLS/fetch failure.
-  const base = source ?? REGISTRY_BASES[0]
-  if (base === undefined) return releaseTarballUrl(version)
-  return registryTarballUrl(base, name, version)
+  const clean = version.trim().replace(/^v/, '')
+  return `${name}@${clean}`
+}
+
+/**
+ * Registry the manager should ask first: the one that answered the check, or
+ * the primary mirror when this process has not checked yet. The manager still
+ * falls through to its own list when this registry is one of them.
+ */
+export function installRegistry(source: string | undefined): string {
+  return source ?? REGISTRY_BASES[0] ?? 'https://registry.npmmirror.com'
+}
+
+/**
+ * Text for a failed install. A specific manager code (incompatible version,
+ * and so on) wins. `operation-error` is the manager's wrapper around a pnpm
+ * failure, so the card shows the `ERR_PNPM_*` line from the diagnostic instead
+ * of that wrapper.
+ */
+export function reportedInstallError(error: InstallResult['error']): string {
+  const code = error?.code
+  const lines = error?.diagnostic?.split('\n').map((line) => line.trim()).filter((line) => line !== '') ?? []
+  if (code !== undefined && code !== '' && code !== 'operation-error') return code
+  const detail = lines.find((line) => line.includes('ERR_PNPM_')) ?? lines[0]
+  if (detail !== undefined && detail !== '') return detail.slice(0, 200)
+  return code === undefined || code === '' ? 'operation-error' : code
 }
 
 /**
