@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld('dshOrb', {
   clamp(canDock, origin) {
     return ipcRenderer.invoke('orb:clamp', { canDock: canDock !== false, origin })
   },
+  origin() {
+    return ipcRenderer.invoke('orb:origin')
+  },
   unsnap() {
     return ipcRenderer.invoke('orb:unsnap')
   },

@@ -128,8 +128,14 @@ ipcMain.handle('orb:clamp', async (event, payload) => {
   if (!fromBall(event) || !placement) return { docked: undefined }
   const request = readClampRequest(payload)
   const result = await placement.clamp(request.canDock, request.origin)
-  logOrbGeometry(result, request.origin)
+  logDockDiagnostics(result, request.origin)
   return result
+})
+
+/** The renderer offsets pointer coordinates by this instead of `event.screenX`. */
+ipcMain.handle('orb:origin', (event) => {
+  if (!fromBall(event) || !placement) return undefined
+  return placement.screenOrigin()
 })
 
 ipcMain.handle('orb:unsnap', async (event) => {
@@ -486,18 +492,21 @@ function isPoint(value: unknown): value is { x: number; y: number } {
 }
 
 /**
- * One stderr line per drag release. Comparing `window` (setBounds/getBounds path)
- * against `remote` (renderer drag coordinates) and each display's scaleFactor
- * localizes Windows machines whose dock decision fails on per-display DPI drift.
+ * Docking diagnostics, off unless `DSH_ORB_DOCK_DEBUG` is set. One stderr line per
+ * drag release: the window bounds (`setBounds`/`getBounds` path), the renderer's
+ * drag coordinates, every display with its scaleFactor, and the decision. A
+ * machine that will not dock reports here exactly which coordinate space drifted,
+ * which is the only way to diagnose a display/DPI layout we cannot reproduce.
  */
-function logOrbGeometry(result: { docked?: 'left' | 'right' }, remoteOrigin?: { x: number; y: number }): void {
+function logDockDiagnostics(result: { docked?: 'left' | 'right' }, remoteOrigin?: { x: number; y: number }): void {
+  if (process.env.DSH_ORB_DOCK_DEBUG !== '1') return
   if (!win || win.isDestroyed()) return
   const displays = screen.getAllDisplays().map((display) => ({
     bounds: display.bounds,
     workArea: display.workArea,
     scaleFactor: display.scaleFactor,
   }))
-  console.error(`[orb-geom] ${JSON.stringify({
+  console.error(`[orb-dock] ${JSON.stringify({
     electron: process.versions.electron,
     window: win.getBounds(),
     remote: remoteOrigin ?? null,

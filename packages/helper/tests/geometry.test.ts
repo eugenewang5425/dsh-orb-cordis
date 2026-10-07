@@ -42,11 +42,11 @@ describe('edge-contact docking', () => {
 
   it('keeps a free ball flush inside the edge when it stops short', async () => {
     const displays = [pair(0, 0, 1440, 900)]
-    const placed = placement(displays, 1367, 400)
-    placed.move(1367, 400)
+    const placed = placement(displays, 1360, 400)
+    placed.move(1360, 400)
     const state = await placed.clamp()
     assert.equal(state.docked, undefined)
-    assert.equal(lastBounds.get(placed)?.x, 1367 - CHROME_INSET)
+    assert.equal(lastBounds.get(placed)?.x, 1360 - CHROME_INSET)
   })
 
   it('docks from the renderer origin when the window bounds stay inside (DPI drift)', async () => {
@@ -66,6 +66,54 @@ describe('edge-contact docking', () => {
     placed.move(30, 400)
     const state = await placed.clamp(true, { x: 0, y: 420 })
     assert.equal(state.docked, 'left')
+  })
+})
+
+/**
+ * Windows quantizes window bounds to whole device pixels, so a ball pushed flush
+ * against a scaled display reports one or two DIP short of the edge exactly when
+ * `physicalWidth / scaleFactor` is fractional (1920/1.5 = 1280, 2560/1.25 = 2048).
+ * These are the machines where docking used to fail while 100%/200% machines worked.
+ */
+describe('docking under DPI rounding', () => {
+  it('docks when quantization leaves the ball a pixel short of the right edge', async () => {
+    const displays = [pair(0, 0, 1280, 720)]
+    const placed = placement(displays, 1206, 400)
+    placed.move(1206, 400)
+    const state = await placed.clamp()
+    assert.equal(state.docked, 'right')
+  })
+
+  it('docks when quantization leaves the ball a pixel short of the left edge', async () => {
+    const displays = [pair(0, 0, 1280, 720)]
+    const placed = placement(displays, 2, 400)
+    placed.move(2, 400)
+    const state = await placed.clamp()
+    assert.equal(state.docked, 'left')
+  })
+
+  it('still keeps a ball clearly short of the edge free', async () => {
+    const displays = [pair(0, 0, 1280, 720)]
+    const placed = placement(displays, 1198, 400)
+    placed.move(1198, 400)
+    const state = await placed.clamp()
+    assert.equal(state.docked, undefined)
+  })
+
+  it('accepts a renderer origin that ran past the left edge', async () => {
+    const displays = [pair(0, 0, 1440, 900)]
+    const placed = placement(displays, 20, 400)
+    placed.move(20, 400)
+    const state = await placed.clamp(true, { x: -6, y: 420 })
+    assert.equal(state.docked, 'left')
+  })
+
+  it('reports the applied window origin for the renderer pointer offset', () => {
+    const displays = [pair(0, 0, 1920, 1080)]
+    const placed = placement(displays, 1600, 500)
+    assert.deepEqual(placed.screenOrigin(), { x: 1600, y: 500 })
+    placed.move(900, 300)
+    assert.deepEqual(placed.screenOrigin(), { x: 900, y: 300 })
   })
 })
 

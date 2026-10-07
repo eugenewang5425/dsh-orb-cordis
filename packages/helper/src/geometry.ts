@@ -18,10 +18,17 @@ export const PANEL_WINDOW_SIZE = {
  */
 export const AGENT_STRIP_WIDTH = 208
 export const BELOW_CENTER = 0.08
-/** Any contact with the display edge docks on release. A deep-overlap bar misses
- * grabs near the trailing rim (the cursor stops at the edge) and machines whose
- * window bounds drift a few pixels (Windows per-display DPI). */
-export const DOCK_OVERLAP = 0
+/**
+ * Any contact with the display edge docks on release, plus a hair of tolerance.
+ * The window bounds and the renderer drag coordinates are both DIPs, but Windows
+ * quantizes each to whole device pixels on the way in and out, so a ball pushed
+ * flush against the edge lands a pixel or two short exactly when
+ * `physicalWidth / scaleFactor` is not an integer (1920/1.5, 2560/1.25, 3840/1.75).
+ * A strict `>=` comparison made docking work on 100%/200% machines and fail on
+ * those, which reads as "works for me, not for other users". Contact is
+ * forgiving; a ball stopped clearly short of the edge still stays free.
+ */
+export const DOCK_OVERLAP = 3
 export const DOCK_DRAG_OFF = Math.round(BALL_SIZE / 3)
 export const DOCK_TAB_WIDTH = 6
 export const DOCK_GLOW = 8
@@ -89,19 +96,21 @@ function clampWindowOrigin(value: number, workOrigin: number, workSize: number, 
 }
 
 /**
- * Which outer display edge the ball reaches on release; any contact docks.
- * An edge that touches another display is a seam, not a place to dock.
+ * Which outer display edge the ball reaches on release; contact within
+ * {@link DOCK_OVERLAP} docks. An edge that touches another display is a seam,
+ * not a place to dock.
  */
 export function dockSideForBallOrigin(
   ball: { readonly x: number; readonly y: number },
   bounds: Rect,
   displays: readonly Rect[] = [],
 ): DockSide | undefined {
-  const leftOverlap = bounds.x - ball.x
-  const rightOverlap = ball.x + BALL_SIZE - (bounds.x + bounds.width)
+  const leftGap = bounds.x - ball.x
+  const rightGap = ball.x + BALL_SIZE - (bounds.x + bounds.width)
+  // The nearer edge wins, so a display narrower than the ball cannot dock both ways.
   let side: DockSide | undefined
-  if (leftOverlap >= DOCK_OVERLAP && leftOverlap >= rightOverlap) side = 'left'
-  else if (rightOverlap >= DOCK_OVERLAP) side = 'right'
+  if (leftGap >= rightGap && leftGap >= -DOCK_OVERLAP) side = 'left'
+  else if (rightGap > leftGap && rightGap >= -DOCK_OVERLAP) side = 'right'
   if (side === undefined || edgeTouchesDisplay(side, bounds, displays)) return undefined
   return side
 }
@@ -215,7 +224,9 @@ function clampBallY(ballY: number, bounds: Rect): number {
   return clamp(Math.round(ballY), bounds.y, bounds.y + bounds.height - BALL_SIZE)
 }
 
-/** Renderer-supplied drag origin, rounded and bounds-checked like `isMove` inputs. */
+/** Renderer-supplied drag origin, rounded and bounds-checked like `isMove` inputs.
+ * Negative coordinates are legitimate: a drag that ran past the left edge of the
+ * primary display reports them, and that ball must still be allowed to dock. */
 function inputBallOrigin(origin?: { x: number; y: number }): { x: number; y: number } | undefined {
   if (origin === undefined) return undefined
   if (!Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return undefined
@@ -291,6 +302,17 @@ export class FloatingPlacement {
     getBounds(): Rect
     setBounds(bounds: Rect): void
   }, private readonly displayAt: (point: { x: number; y: number }) => DisplayPair, private readonly displayBounds: () => readonly Rect[] = () => []) {}
+
+  /**
+   * Window origin as the OS applied it. The renderer offsets its pointer
+   * coordinates by this instead of trusting `event.screenX`, which Chromium
+   * derives from the window origin it has cached and therefore reports stale
+   * (jumpy) values while the window is being moved under the cursor.
+   */
+  screenOrigin(): { x: number; y: number } {
+    const bounds = this.window.getBounds()
+    return { x: bounds.x + CHROME_INSET, y: bounds.y + CHROME_INSET }
+  }
 
   /** Resize between the ball and the panel while keeping the ball origin fixed. */
   setExpanded(expanded: boolean): ExpandState {
@@ -378,7 +400,7 @@ export class FloatingPlacement {
       return { docked: this.docked.side }
     }
     if (isCollapsed(bounds)) {
-      const origin = { x: bounds.x + CHROME_INSET, y: bounds.y + CHROME_INSET }
+      const origin = this.screenOrigin()
       if (canDock) {
         const side = dockSideForBallOrigin(origin, display.bounds, this.displayBounds())
         if (side) return this.snap(side, origin.y, display.bounds)
@@ -411,7 +433,7 @@ export class FloatingPlacement {
   private currentBallOrigin(workArea: Rect): { x: number; y: number } {
     const bounds = this.window.getBounds()
     if (this.docked) return insideBallOrigin(this.docked.side, this.docked.y, this.displayAt(center(bounds)))
-    if (isCollapsed(bounds)) return { x: bounds.x + CHROME_INSET, y: bounds.y + CHROME_INSET }
+    if (isCollapsed(bounds)) return this.screenOrigin()
     return ballOriginFromWindow(bounds, this.direction)
   }
 
