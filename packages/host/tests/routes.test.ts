@@ -83,6 +83,7 @@ describe('settings routes', () => {
       async setBackgroundModel(selection) { store.setBackground(selection); calls.push(['background', selection]) },
       async setSelectionEnabled(enabled) { store.setSelectionEnabled(enabled) },
       async setMillifractionEnabled(enabled) { store.setMillifractionEnabled(enabled) },
+      async setObservationFrameEnabled(enabled) { store.setObservationFrameEnabled(enabled) },
       async setBallEnabled(enabled) { store.setBallEnabled(enabled) },
       updateState: () => ({
         currentVersion: '0.1.0',
@@ -206,6 +207,11 @@ describe('settings routes', () => {
     assert.equal(JSON.parse(fraction.body.toString('utf8')).millifractionEnabled, true)
     assert.equal(store.coordinateMode(), 'millifraction')
 
+    const frame = response()
+    await handler(request('POST', '/.dsh-orb/observation-frame', JSON.stringify({ enabled: false }), { 'x-dsh-user': 'ok' }), frame)
+    assert.equal(JSON.parse(frame.body.toString('utf8')).observationFrameEnabled, false)
+    assert.equal(store.observationFrameEnabled(), false)
+
     const ball = response()
     await handler(request('POST', '/.dsh-orb/ball', JSON.stringify({ enabled: false }), { 'x-dsh-user': 'ok' }), ball)
     assert.equal(JSON.parse(ball.body.toString('utf8')).ballEnabled, false)
@@ -290,6 +296,7 @@ describe('settings routes', () => {
       async setBackgroundModel() {},
       async setSelectionEnabled() {},
       async setMillifractionEnabled() {},
+      async setObservationFrameEnabled() {},
       async setBallEnabled() {},
       updateState: () => ({ ...emptyUpdate, currentVersion: '0.1.0', installedVersion: '0.1.0' }),
       async checkUpdate() { calls.push('check') },
@@ -362,6 +369,7 @@ describe('settings routes', () => {
       async setBackgroundModel() {},
       async setSelectionEnabled() {},
       async setMillifractionEnabled() {},
+      async setObservationFrameEnabled() {},
       async setBallEnabled() {},
       updateState: () => ({ ...emptyUpdate }),
       async checkUpdate() {},

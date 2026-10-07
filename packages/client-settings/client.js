@@ -44,6 +44,9 @@ window.__ModuleLoader__.load({
       millifractionDescription: '新建对话使用截图的 0–1000 比例。关闭后使用已附加图片的像素。更改此项会新建对话。',
       millifractionToggle: '使用千分比坐标',
       millifractionConfirm: '新编码只在新对话中生效。当前对话不变，仍可从历史记录打开。取消不写入、不新建。',
+      frameTitle: '观察框彩带',
+      frameDescription: 'Computer Use 操作某个窗口时，窗口周围显示这条彩带。关闭后不再显示。',
+      frameToggle: '显示观察框彩带',
       tccTitle: 'Mac 权限',
       tccDescription: 'Computer Use 需要屏幕录制与辅助功能。点按钮打开系统设置对应页。',
       tccAppHint: '在列表里打开 {name}。',
@@ -113,6 +116,9 @@ window.__ModuleLoader__.load({
       millifractionDescription: 'New chats use 0–1000 fractions of the screenshot. Turn off to use pixels of the attached image. Changing this creates a new conversation.',
       millifractionToggle: 'Use millifraction coordinates',
       millifractionConfirm: 'The new encoding takes effect in a new conversation. The current conversation stays unchanged and remains in History. Cancel leaves the default and this chat as they are.',
+      frameTitle: 'Observation ribbon',
+      frameDescription: 'Draws the coloured ribbon around the window Computer Use is working on. Turn it off to hide it.',
+      frameToggle: 'Show the observation ribbon',
       tccTitle: 'Mac permissions',
       tccDescription: 'Computer Use needs Screen Recording and Accessibility. Each button opens that System Settings pane.',
       tccAppHint: 'In the list, turn on {name}.',
@@ -429,6 +435,15 @@ window.__ModuleLoader__.load({
               if (enabled === snap.millifractionEnabled) return
               if (!window.confirm(text.millifractionConfirm)) return
               void mutate('/.dsh-orb/millifraction', { enabled })
+            },
+          })),
+          card(text.frameTitle, text.frameDescription, h(Toggle, {
+            checked: snap.observationFrameEnabled !== false,
+            label: text.frameToggle,
+            disabled,
+            onChange: (enabled) => {
+              if (enabled === snap.observationFrameEnabled) return
+              void mutate('/.dsh-orb/observation-frame', { enabled })
             },
           })),
           snap.tcc && snap.tcc.applicable ? tccCard(text, snap, disabled, mutate) : null))

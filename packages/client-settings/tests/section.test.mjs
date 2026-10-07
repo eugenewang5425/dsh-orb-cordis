@@ -29,6 +29,7 @@ function loadSection() {
     background: { provider: 'deepseek-official', model: 'deepseek-flash', reasoningEffort: 'max' },
     selectionEnabled: false,
     millifractionEnabled: false,
+    observationFrameEnabled: true,
     tcc: { applicable: true, appName: 'DeepSeek Harness', screen: 'missing', accessibility: 'granted' },
     update: {
       currentVersion: '0.1.0',
@@ -119,6 +120,7 @@ function loadSection() {
       if (path === '/.dsh-orb/update') return json(snapshot.update)
       if (options.method === 'POST' && path === '/.dsh-orb/ball') snapshot.ballEnabled = JSON.parse(options.body).enabled
       if (options.method === 'POST' && path === '/.dsh-orb/millifraction') snapshot.millifractionEnabled = JSON.parse(options.body).enabled
+      if (options.method === 'POST' && path === '/.dsh-orb/observation-frame') snapshot.observationFrameEnabled = JSON.parse(options.body).enabled
       if (options.method === 'POST' && path === '/.dsh-orb/overlay-model') snapshot.overlay = JSON.parse(options.body)
       if (options.method === 'POST' && path === '/.dsh-orb/avatar/preset') snapshot.avatarPresetId = JSON.parse(options.body).preset
       if (options.method === 'POST' && path === '/.dsh-orb/update/check') {
@@ -252,6 +254,13 @@ describe('settings section', () => {
     await settle()
     const fractionCall = page.calls.find((call) => call.path === '/.dsh-orb/millifraction')
     assert.equal(JSON.parse(fractionCall.options.body).enabled, true)
+
+    view = page.render()
+    const frame = find(view, (node) => node.props?.['aria-label'] === '显示观察框彩带')[0]
+    frame.props.onClick()
+    await settle()
+    const frameCall = page.calls.find((call) => call.path === '/.dsh-orb/observation-frame')
+    assert.equal(JSON.parse(frameCall.options.body).enabled, false)
 
     view = page.render()
     const overlay = find(view, (node) => node.type === 'select' && node.props['aria-label'] === '悬浮球 Agent')[0]

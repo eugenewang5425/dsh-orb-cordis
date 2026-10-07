@@ -49,6 +49,7 @@ export interface OrbControl {
   setBackgroundModel(selection: AgentModelSelection): Promise<void>
   setSelectionEnabled(enabled: boolean): Promise<void>
   setMillifractionEnabled(enabled: boolean): Promise<void>
+  setObservationFrameEnabled(enabled: boolean): Promise<void>
   setBallEnabled(enabled: boolean): Promise<void>
   helperStatus?(): string
   /** The pending ball-initiated jump target, or null once consumed or expired. */
@@ -207,6 +208,16 @@ async function handle(deps: RouteDeps, req: IncomingMessage, res: ServerResponse
     sendJson(res, 200, await snapshot(deps))
     return
   }
+  if (method === 'POST' && path === `${PREFIX}/observation-frame`) {
+    const enabled = booleanField(await readJson(req))
+    if (enabled === undefined) {
+      sendJson(res, 400, { error: 'invalid-observation-frame' })
+      return
+    }
+    await deps.control.setObservationFrameEnabled(enabled)
+    sendJson(res, 200, await snapshot(deps))
+    return
+  }
   if (method === 'POST' && path === `${PREFIX}/ball`) {
     const enabled = booleanField(await readJson(req))
     if (enabled === undefined) {
@@ -277,6 +288,7 @@ async function snapshot(deps: RouteDeps): Promise<{
   background: AgentModelSelection
   selectionEnabled: boolean
   millifractionEnabled: boolean
+  observationFrameEnabled: boolean
   tcc: TccStatus
   helperError: string
   selectionAvailable: boolean
@@ -298,6 +310,7 @@ async function snapshot(deps: RouteDeps): Promise<{
     background: models.background,
     selectionEnabled: deps.store.selectionEnabled(),
     millifractionEnabled: deps.store.millifractionEnabled(),
+    observationFrameEnabled: deps.store.observationFrameEnabled(),
     tcc: deps.tcc.status(),
     helperError: deps.control.helperStatus?.() ?? '',
     selectionAvailable: selectionRuntimeAvailable(),

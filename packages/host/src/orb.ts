@@ -301,6 +301,7 @@ export class OrbRuntime {
     send: (message, signal) => this.waitAck(message, signal),
     setHidInput: (active) => { this.selection.setHidInput(active) },
     chromeWindowIds: () => this.chromeWindowIds(),
+    observationFrameEnabled: () => this.store.observationFrameEnabled(),
   })
   /**
    * Windows only. Clicking the ball makes it the system foreground window, so the window
@@ -1382,6 +1383,13 @@ export class OrbRuntime {
     this.store.setMillifractionEnabled(enabled)
     if (this.sessionId) await this.newSession()
     else await this.publishChrome()
+  }
+
+  /** The observation ribbon. Turning it off takes any live frame down at once. */
+  async setObservationFrameEnabled(enabled: boolean): Promise<void> {
+    if (this.store.observationFrameEnabled() === enabled) return
+    this.store.setObservationFrameEnabled(enabled)
+    if (!enabled) await this.overlay.setObservationFrame(null)
   }
 
   async setBallEnabled(enabled: boolean): Promise<void> {
