@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { after, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { ProfileStore } from '../src/preferences.ts'
-import { AUTO_CHECK_INTERVAL_MS, compareVersions, installSpec, ownPackage, registryTarballUrl, releaseTarballUrl, UpdateChecker, versionFromRegistry, versionFromRelease, withReleaseAgeExclusion } from '../src/update.ts'
+import { AUTO_CHECK_INTERVAL_MS, compareVersions, installRegistry, installSpec, ownPackage, registryTarballUrl, releaseTarballUrl, UpdateChecker, versionFromRegistry, versionFromRelease, withReleaseAgeExclusion } from '../src/update.ts'
 
 const root = mkdtempSync(join(tmpdir(), 'orb-update-'))
 after(() => { rmSync(root, { recursive: true, force: true }) })
@@ -22,11 +22,14 @@ function store(): ProfileStore {
 /** A manager that records the spec it was handed and answers with a scripted result. */
 function manager(result: Record<string, unknown> = { application: 'restart-required' }) {
   const specs: string[] = []
+  const registries: Array<string | undefined> = []
   return {
     specs,
+    registries,
     service: {
-      async installBundle(spec: string) {
+      async installBundle(spec: string, options?: { registry?: string }) {
         specs.push(spec)
+        registries.push(options?.registry)
         return result
       },
     },
@@ -49,7 +52,7 @@ function checker(options: {
     fetchLatest: async () => options.latest,
     own: 'own' in options ? options.own : { name: 'dsh-orb', version: '0.1.0' },
   })
-  return { update, announced, specs: fake.specs }
+  return { update, announced, specs: fake.specs, registries: fake.registries }
 }
 
 /** A local http mock answering `routes[path]` with `[status, body]`; other paths hang up. */
@@ -170,21 +173,24 @@ describe('update sources', () => {
       registryTarballUrl('https://registry.npmmirror.com', 'dsh-orb', '0.2.0'),
       'https://registry.npmmirror.com/dsh-orb/-/dsh-orb-0.2.0.tgz',
     )
+    assert.equal(installSpec('0.2.0', 'dsh-orb'), 'dsh-orb@0.2.0')
+    assert.equal(installSpec('v0.2.0-rc.1', 'dsh-orb'), 'dsh-orb@0.2.0-rc.1')
     assert.equal(
-      installSpec('0.2.0', undefined, 'dsh-orb'),
-      'https://registry.npmmirror.com/dsh-orb/-/dsh-orb-0.2.0.tgz',
-      'an unknown source installs from the primary mirror, not the dormant release tarball',
+      installRegistry(undefined),
+      'https://registry.npmmirror.com',
+      'an unknown source asks the primary mirror first',
     )
+    assert.equal(installRegistry('https://registry.npmjs.org'), 'https://registry.npmjs.org')
     process.env.DSH_ORB_UPDATE_URL = 'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz'
     assert.equal(
-      installSpec('0.2.0', 'https://registry.npmmirror.com', 'dsh-orb'),
+      installSpec('0.2.0', 'dsh-orb'),
       'http://127.0.0.1:9/downloads/dsh-orb-0.2.0.tgz',
-      'the env override wins over the answering source',
+      'the env override wins over the version spec',
     )
     delete process.env.DSH_ORB_UPDATE_URL
   })
 
-  it('prefers a registry that answers and installs its tarball, over real HTTP', async () => {
+  it('prefers a registry that answers and installs that version from it, over real HTTP', async () => {
     const registry = await mockServer({ '/dsh-orb/latest': [200, '{"name":"dsh-orb","version":"0.3.0"}'] })
     try {
       await withEnv({ DSH_ORB_UPDATE_REGISTRIES: registry.base }, async () => {
@@ -201,7 +207,8 @@ describe('update sources', () => {
         assert.deepEqual(announced, ['0.3.0'])
         assert.equal(update.state().error, null)
         await update.install()
-        assert.deepEqual(fake.specs, [`${registry.base}/dsh-orb/-/dsh-orb-0.3.0.tgz`])
+        assert.deepEqual(fake.specs, ['dsh-orb@0.3.0'])
+        assert.deepEqual(fake.registries, [registry.base])
       })
     } finally {
       registry.close()
@@ -224,7 +231,8 @@ describe('update sources', () => {
         await update.check(true)
         assert.deepEqual(announced, ['0.4.0'], 'the second registry answered')
         await update.install()
-        assert.deepEqual(fake.specs, [`${registry.base}/dsh-orb/-/dsh-orb-0.4.0.tgz`])
+        assert.deepEqual(fake.specs, ['dsh-orb@0.4.0'])
+        assert.deepEqual(fake.registries, [registry.base])
       })
     } finally {
       registry.close()
@@ -248,9 +256,8 @@ describe('update sources', () => {
         await update.check(true)
         assert.deepEqual(announced, ['0.2.0'], 'the release answered after the registry 404ed')
         await update.install()
-        assert.deepEqual(fake.specs, [
-          'https://registry.npmmirror.com/dsh-orb/-/dsh-orb-0.2.0.tgz',
-        ], 'installs from the primary mirror: this repository publishes no release tarballs')
+        assert.deepEqual(fake.specs, ['dsh-orb@0.2.0'])
+        assert.deepEqual(fake.registries, ['https://registry.npmmirror.com'], 'the version still installs from the primary mirror')
       })
     } finally {
       registry.close()
@@ -401,12 +408,11 @@ describe('update checker', () => {
 
   it('installer falls back to the primary mirror when no check source is known', async () => {
     const profile = store()
-    const { update, specs } = checker({ store: profile, latest: '0.2.0' })
+    const { update, specs, registries } = checker({ store: profile, latest: '0.2.0' })
     await update.check()
     await update.install()
-    assert.deepEqual(specs, [
-      'https://registry.npmmirror.com/dsh-orb/-/dsh-orb-0.2.0.tgz',
-    ], 'the GitHub release tarball is dormant and must not be the fallback')
+    assert.deepEqual(specs, ['dsh-orb@0.2.0'])
+    assert.deepEqual(registries, ['https://registry.npmmirror.com'], 'no check source still asks the primary mirror')
     const state = update.state()
     assert.equal(state.updating, false)
     assert.equal(state.error, null)
@@ -455,6 +461,25 @@ describe('update checker', () => {
       diagnosed.update.state().error,
       'ERR_PNPM_NO_MATURE_MATCHING_VERSION: 1 version does not meet the minimumReleaseAge constraint',
       'a codeless pnpm failure keeps its first diagnostic line',
+    )
+
+    const wrapped = checker({
+      store: profile,
+      latest: '0.2.0',
+      result: {
+        application: 'failed',
+        error: {
+          code: 'operation-error',
+          diagnostic: 'Progress: resolved 1, reused 0, downloaded 0, added 0\n[ERR_PNPM_MISSING_TARBALL_INTEGRITY] Cannot install package "dsh-orb@https://example.invalid/dsh-orb.tgz"\nmore',
+        },
+      },
+    })
+    await wrapped.update.check()
+    await wrapped.update.install()
+    assert.equal(
+      wrapped.update.state().error,
+      '[ERR_PNPM_MISSING_TARBALL_INTEGRITY] Cannot install package "dsh-orb@https://example.invalid/dsh-orb.tgz"',
+      'the generic operation-error wrapper yields to the pnpm line',
     )
   })
 
