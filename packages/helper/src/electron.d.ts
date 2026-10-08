@@ -61,6 +61,8 @@ declare module 'electron' {
     show?: boolean
     backgroundColor?: string
     roundedCorners?: boolean
+    /** Windows only. `false` drops the resize border on a frameless window. */
+    thickFrame?: boolean
     type?: string
     webPreferences?: {
       preload?: string

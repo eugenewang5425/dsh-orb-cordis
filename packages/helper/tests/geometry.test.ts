@@ -127,6 +127,30 @@ describe('docking under DPI rounding', () => {
   })
 })
 
+/**
+ * Chromium's DIP conversion ceils sizes, and a scaled window is kept inside the
+ * monitor. `enclose` is that ceil round-trip: 96 DIP becomes 97 at 120% and
+ * stays 96 at 150%. Either way the window's right edge cannot pass the screen,
+ * so the ball's read-back sits a chrome-width short of the edge.
+ */
+describe('docking on a scaled Windows display', () => {
+  for (const [scale, width] of [[1.2, 1600], [1.5, 1280]] as const) {
+    for (const side of ['right', 'left'] as const) {
+      it(`docks on the ${side} at ${scale} even though the window reads back inside the screen`, async () => {
+        const displays = [pair(0, 0, width, 900)]
+        const placed = scaledPlacement(displays, scale, 400, 400)
+        placed.press({ x: 430, y: 430 })
+        placed.beginDrag()
+        const cursorX = side === 'right' ? width - 1 : 0
+        placed.dragTo({ x: cursorX, y: 430 })
+        const state = await placed.endDrag({ x: cursorX, y: 430 })
+        assert.equal(state.docked, side)
+        assert.ok((lastBounds.get(placed)?.width ?? 0) < 200, 'release must not open the panel')
+      })
+    }
+  }
+})
+
 describe('bookmark strip geometry', () => {
   it('widens the expanded window on the far edge and keeps the ball origin', () => {
     const displays = [pair(0, 0, 1920, 1080)]
@@ -271,6 +295,50 @@ const lastBounds = new WeakMap<FloatingPlacement, Rect>()
 function pair(x: number, y: number, width: number, height: number): { bounds: Rect; workArea: Rect } {
   const bounds = { x, y, width, height }
   return { bounds, workArea: bounds }
+}
+
+/** DIP size after Chromium's enclosing-rect round trip through device pixels. */
+function enclose(dip: number, scale: number): number {
+  const physical = Math.ceil(dip * scale - 1e-9)
+  return Math.ceil(physical / scale - 1e-9)
+}
+
+/**
+ * A window whose applied bounds are what Windows gives back above 100% scale:
+ * the size is ceiled, and the rectangle is pulled back inside the display.
+ */
+function scaledPlacement(
+  displays: { bounds: Rect; workArea: Rect }[],
+  scale: number,
+  x: number,
+  y: number,
+): FloatingPlacement {
+  const screen = displays[0]?.bounds ?? { x: 0, y: 0, width: 0, height: 0 }
+  let bounds: Rect = {
+    x: x - CHROME_INSET,
+    y: y - CHROME_INSET,
+    width: BALL_WINDOW_SIZE,
+    height: BALL_WINDOW_SIZE,
+  }
+  const placed = new FloatingPlacement({
+    getBounds: () => ({ ...bounds }),
+    setBounds(next) {
+      const width = enclose(next.width, scale)
+      const height = enclose(next.height, scale)
+      const minX = screen.x
+      const maxX = Math.max(minX, screen.x + screen.width - width)
+      const minY = screen.y
+      const maxY = Math.max(minY, screen.y + screen.height - height)
+      bounds = {
+        x: Math.min(Math.max(next.x, minX), maxX),
+        y: Math.min(Math.max(next.y, minY), maxY),
+        width,
+        height,
+      }
+      lastBounds.set(placed, { ...bounds })
+    },
+  }, (point) => nearest(displays, point), () => displays.map((display) => display.bounds))
+  return placed
 }
 
 function placement(displays: { bounds: Rect; workArea: Rect }[], x: number, y: number): FloatingPlacement {

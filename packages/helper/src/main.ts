@@ -254,6 +254,9 @@ function openWindow(): BrowserWindow {
     show: false,
     backgroundColor: '#00000000',
     roundedCorners: false,
+    // The default thick frame is a resize border. On a scaled display its DIP
+    // inset does not match the bounds we set, so the ball stops short of the edge.
+    ...process.platform === 'win32' ? { thickFrame: false } : {},
     ...process.platform === 'darwin' ? { type: 'panel' } : {},
     webPreferences: {
       preload: fileURLToPath(new URL('../preload.cjs', import.meta.url)),

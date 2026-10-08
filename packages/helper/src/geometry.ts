@@ -92,13 +92,24 @@ function collapsedWindowBounds(ball: { readonly x: number; readonly y: number })
   }
 }
 
+/**
+ * Chromium turns a DIP window size into device pixels with an enclosing rect, then
+ * converts back the same way. Whenever `size * scaleFactor` is not an integer
+ * (120% is 115.2), a 96px ball window reads back 97. The panel is hundreds of
+ * pixels larger, so a few DIP still cannot be the panel. 150% keeps 96 exactly
+ * (`96 * 1.5 = 144`) but still pulls a window that would hang past the screen
+ * back inside, which the dock decision handles separately.
+ */
+const BALL_WINDOW_SLOP = 4
+
 function isCollapsed(bounds: Rect): boolean {
-  return bounds.width <= BALL_WINDOW_SIZE && bounds.height <= BALL_WINDOW_SIZE
+  return bounds.width <= BALL_WINDOW_SIZE + BALL_WINDOW_SLOP && bounds.height <= BALL_WINDOW_SIZE + BALL_WINDOW_SLOP
 }
 
 /** The full ball window, as drawn by a collapsed ball or a slide still in flight. */
 function drawsBall(bounds: Rect): boolean {
-  return bounds.width === BALL_WINDOW_SIZE && bounds.height === BALL_WINDOW_SIZE
+  return Math.abs(bounds.width - BALL_WINDOW_SIZE) <= BALL_WINDOW_SLOP
+    && Math.abs(bounds.height - BALL_WINDOW_SIZE) <= BALL_WINDOW_SLOP
 }
 
 function clampWindowOrigin(value: number, workOrigin: number, workSize: number, windowSize: number): number {
@@ -301,6 +312,13 @@ export class FloatingPlacement {
   private grab: Point | undefined
   /** Set once the renderer reports that the gesture passed the drag threshold. */
   private dragging = false
+  /**
+   * Ball origin last requested. The OS read-back is not a safe dock input on
+   * Windows once the scale is above 100%: the window is kept inside the monitor,
+   * so the 12px transparent chrome leaves the ball a chrome-width short of the
+   * edge it was aimed at.
+   */
+  private placedOrigin: Point | undefined
 
   constructor(private readonly window: {
     getBounds(): Rect
@@ -365,6 +383,7 @@ export class FloatingPlacement {
    */
   move(x: number, y: number, canDock = true): DockState {
     const origin = { x: Math.round(x), y: Math.round(y) }
+    this.placedOrigin = origin
     const bounds = this.window.getBounds()
     if (!isCollapsed(bounds) && this.docked === undefined) {
       const direction = this.direction
@@ -433,8 +452,8 @@ export class FloatingPlacement {
 
   /**
    * Pull a free ball inside the work area, or dock it when it reaches a side edge.
-   * The docking decision reads the window bounds the OS applied, so it works the
-   * same on every platform and DPI setup.
+   * The decision uses the origin the drag requested. The window the OS actually
+   * applied can sit short of that on a scaled Windows display.
    */
   async clamp(canDock = true): Promise<ExpandState> {
     const bounds = this.window.getBounds()
@@ -444,7 +463,7 @@ export class FloatingPlacement {
       return this.expandState()
     }
     if (isCollapsed(bounds)) {
-      const origin = this.collapsedBallOrigin()
+      const origin = this.placedOrigin ?? this.collapsedBallOrigin()
       if (canDock) {
         const side = dockSideForBallOrigin(origin, display.bounds, this.displayBounds())
         if (side) return this.snap(side, origin.y, display.bounds)
