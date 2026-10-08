@@ -111,6 +111,8 @@ declare module 'electron' {
     getPrimaryDisplay(): Display
     getAllDisplays(): Display[]
     getDisplayNearestPoint(point: { x: number; y: number }): Display
+    /** Absolute cursor position in DIPs, the same space `BrowserWindow` bounds use. */
+    getCursorScreenPoint(): { x: number; y: number }
     screenToDipRect(window: null, rect: Rectangle): Rectangle
   }
 

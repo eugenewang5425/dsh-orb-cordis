@@ -20,13 +20,12 @@ export const AGENT_STRIP_WIDTH = 208
 export const BELOW_CENTER = 0.08
 /**
  * Any contact with the display edge docks on release, plus a hair of tolerance.
- * The window bounds and the renderer drag coordinates are both DIPs, but Windows
- * quantizes each to whole device pixels on the way in and out, so a ball pushed
- * flush against the edge lands a pixel or two short exactly when
+ * Windows quantizes window bounds to whole device pixels, so a ball placed flush
+ * against the edge can read back a pixel or two short when
  * `physicalWidth / scaleFactor` is not an integer (1920/1.5, 2560/1.25, 3840/1.75).
- * A strict `>=` comparison made docking work on 100%/200% machines and fail on
- * those, which reads as "works for me, not for other users". Contact is
- * forgiving; a ball stopped clearly short of the edge still stays free.
+ * The drag itself no longer depends on that read-back; this only absorbs the
+ * rounding of the final placement. A ball stopped clearly short of the edge
+ * still stays free.
  */
 export const DOCK_OVERLAP = 3
 export const DOCK_DRAG_OFF = Math.round(BALL_SIZE / 3)
@@ -69,6 +68,12 @@ export interface DisplayPair {
   readonly workArea: Rect
 }
 
+/** A point in the same DIP space as window bounds (screen coordinates). */
+export interface Point {
+  readonly x: number
+  readonly y: number
+}
+
 interface Direction {
   horizontal: HorizontalExpand
   vertical: VerticalExpand
@@ -89,6 +94,11 @@ function collapsedWindowBounds(ball: { readonly x: number; readonly y: number })
 
 function isCollapsed(bounds: Rect): boolean {
   return bounds.width <= BALL_WINDOW_SIZE && bounds.height <= BALL_WINDOW_SIZE
+}
+
+/** The full ball window, as drawn by a collapsed ball or a slide still in flight. */
+function drawsBall(bounds: Rect): boolean {
+  return bounds.width === BALL_WINDOW_SIZE && bounds.height === BALL_WINDOW_SIZE
 }
 
 function clampWindowOrigin(value: number, workOrigin: number, workSize: number, windowSize: number): number {
@@ -224,16 +234,6 @@ function clampBallY(ballY: number, bounds: Rect): number {
   return clamp(Math.round(ballY), bounds.y, bounds.y + bounds.height - BALL_SIZE)
 }
 
-/** Renderer-supplied drag origin, rounded and bounds-checked like `isMove` inputs.
- * Negative coordinates are legitimate: a drag that ran past the left edge of the
- * primary display reports them, and that ball must still be allowed to dock. */
-function inputBallOrigin(origin?: { x: number; y: number }): { x: number; y: number } | undefined {
-  if (origin === undefined) return undefined
-  if (!Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return undefined
-  if (Math.abs(origin.x) > 100_000 || Math.abs(origin.y) > 100_000) return undefined
-  return { x: Math.round(origin.x), y: Math.round(origin.y) }
-}
-
 function offScreenBallOrigin(side: DockSide, ballY: number, bounds: Rect): { x: number; y: number } {
   const y = clampBallY(ballY, bounds)
   return {
@@ -297,29 +297,31 @@ export class FloatingPlacement {
   private docked: { side: DockSide; y: number } | undefined
   private stripWidth = 0
   private anim = 0
+  /** Cursor offset inside the ball, recorded at press and kept for the whole gesture. */
+  private grab: Point | undefined
+  /** Set once the renderer reports that the gesture passed the drag threshold. */
+  private dragging = false
 
   constructor(private readonly window: {
     getBounds(): Rect
     setBounds(bounds: Rect): void
   }, private readonly displayAt: (point: { x: number; y: number }) => DisplayPair, private readonly displayBounds: () => readonly Rect[] = () => []) {}
 
-  /**
-   * Window origin as the OS applied it. The renderer offsets its pointer
-   * coordinates by this instead of trusting `event.screenX`, which Chromium
-   * derives from the window origin it has cached and therefore reports stale
-   * (jumpy) values while the window is being moved under the cursor.
-   */
-  screenOrigin(): { x: number; y: number } {
+  /** Ball origin of a collapsed window, from the window bounds the OS applied. */
+  private collapsedBallOrigin(): Point {
     const bounds = this.window.getBounds()
     return { x: bounds.x + CHROME_INSET, y: bounds.y + CHROME_INSET }
   }
 
   /** Resize between the ball and the panel while keeping the ball origin fixed. */
   setExpanded(expanded: boolean): ExpandState {
+    // Any explicit placement stops a slide still in flight, or its frames would
+    // overwrite the window this call just set.
+    this.anim += 1
     const bounds = this.window.getBounds()
     const display = this.displayAt(center(bounds))
     if (expanded) {
-      const origin = this.currentBallOrigin(display.workArea)
+      const origin = this.currentBallOrigin()
       this.docked = undefined
       const next = expandedOverlayBounds(origin, display.workArea, this.stripWidth)
       this.direction = { horizontal: next.horizontal, vertical: next.vertical }
@@ -330,7 +332,7 @@ export class FloatingPlacement {
       this.applyTab(this.docked.side, this.docked.y, display.bounds)
       return { expanded: false, ...this.direction, docked: this.docked.side, strip: this.stripWidth }
     }
-    const origin = clampedBallOrigin(this.currentBallOrigin(display.workArea), display.workArea)
+    const origin = clampedBallOrigin(this.currentBallOrigin(), display.workArea)
     this.window.setBounds(collapsedWindowBounds(origin))
     return { expanded: false, ...this.direction, docked: undefined, strip: this.stripWidth }
   }
@@ -349,7 +351,7 @@ export class FloatingPlacement {
     const bounds = this.window.getBounds()
     if (!isCollapsed(bounds) && !this.docked) {
       const display = this.displayAt(center(bounds))
-      const origin = this.currentBallOrigin(display.workArea)
+      const origin = this.currentBallOrigin()
       const nextBounds = expandedOverlayBounds(origin, display.workArea, this.stripWidth)
       this.direction = { horizontal: nextBounds.horizontal, vertical: nextBounds.vertical }
       this.window.setBounds({ x: nextBounds.x, y: nextBounds.y, width: nextBounds.width, height: nextBounds.height })
@@ -387,35 +389,72 @@ export class FloatingPlacement {
   }
 
   /**
-   * Pull a free ball inside the work area, or dock it when it reaches a side edge.
-   * `remoteOrigin` is the renderer's input-side ball origin (drag coordinates).
-   * On Windows the window bounds can come back mis-scaled (per-display DPI,
-   * electron#10862), so either signal docking is enough.
+   * Pointer pressed on the ball. The grab offset comes from the OS cursor and the
+   * ball origin the window really has, both in the DIP space `setBounds` uses, so
+   * the drag never reads a renderer-side window position.
    */
-  async clamp(canDock = true, remoteOrigin?: { x: number; y: number }): Promise<DockState> {
+  press(cursor: Point): void {
+    // A slide-off still in flight is taken over: the ball stops where it is drawn and
+    // is free, so the grab and the drag both read the place the ball is actually at.
+    this.stopSlideOff()
+    const origin = this.currentBallOrigin()
+    this.grab = { x: cursor.x - origin.x, y: cursor.y - origin.y }
+    this.dragging = false
+  }
+
+  /** The gesture passed the drag threshold; from here the ball follows the cursor. */
+  beginDrag(): void {
+    this.dragging = this.grab !== undefined
+  }
+
+  /**
+   * Follow the cursor. Stateless on purpose: the target is always cursor minus grab,
+   * so the window moving cannot feed back into the next target.
+   */
+  dragTo(cursor: Point, canDock = true): DockState {
+    if (!this.dragging || this.grab === undefined) return { docked: this.docked?.side }
+    return this.move(cursor.x - this.grab.x, cursor.y - this.grab.y, canDock)
+  }
+
+  /**
+   * Release. The ball is placed under the cursor, then docked on a side edge or
+   * pulled back into the work area. The result is the full layout the page must
+   * show, including the panel direction when a running panel re-anchored.
+   */
+  async endDrag(cursor: Point, canDock = true): Promise<ExpandState> {
+    const grab = this.grab
+    const dragging = this.dragging
+    this.grab = undefined
+    this.dragging = false
+    if (grab === undefined || !dragging) return this.expandState()
+    this.move(cursor.x - grab.x, cursor.y - grab.y, canDock)
+    return this.clamp(canDock)
+  }
+
+  /**
+   * Pull a free ball inside the work area, or dock it when it reaches a side edge.
+   * The docking decision reads the window bounds the OS applied, so it works the
+   * same on every platform and DPI setup.
+   */
+  async clamp(canDock = true): Promise<ExpandState> {
     const bounds = this.window.getBounds()
     const display = this.displayAt(center(bounds))
     if (this.docked) {
       this.applyTab(this.docked.side, this.docked.y, display.bounds)
-      return { docked: this.docked.side }
+      return this.expandState()
     }
     if (isCollapsed(bounds)) {
-      const origin = this.screenOrigin()
+      const origin = this.collapsedBallOrigin()
       if (canDock) {
         const side = dockSideForBallOrigin(origin, display.bounds, this.displayBounds())
         if (side) return this.snap(side, origin.y, display.bounds)
-        const remote = inputBallOrigin(remoteOrigin)
-        if (remote) {
-          const remoteDisplay = this.displayAt(remote)
-          const remoteSide = dockSideForBallOrigin(remote, remoteDisplay.bounds, this.displayBounds())
-          if (remoteSide) return this.snap(remoteSide, remote.y, remoteDisplay.bounds)
-        }
       }
       this.window.setBounds(collapsedWindowBounds(clampedBallOrigin(origin, display.workArea)))
-      return { docked: undefined }
+      return this.expandState()
     }
-    this.setExpanded(true)
-    return { docked: undefined }
+    // An open panel (running or asking) re-anchors toward the side with room now.
+    // The new direction goes back with the result; the page cannot infer it.
+    return this.setExpanded(true)
   }
 
   /** Slide the ball back on screen from a docked tab. */
@@ -430,10 +469,20 @@ export class FloatingPlacement {
     return { docked: undefined }
   }
 
-  private currentBallOrigin(workArea: Rect): { x: number; y: number } {
+  /** Stop a slide-off that still draws the ball window; the ball stays free where it is. */
+  private stopSlideOff(): void {
+    if (this.docked && drawsBall(this.window.getBounds())) {
+      this.docked = undefined
+      this.anim += 1
+    }
+  }
+
+  private currentBallOrigin(): Point {
     const bounds = this.window.getBounds()
-    if (this.docked) return insideBallOrigin(this.docked.side, this.docked.y, this.displayAt(center(bounds)))
-    if (isCollapsed(bounds)) return this.screenOrigin()
+    // A docked window at rest is the thin tab. While the slide-off still draws the
+    // full ball window, the ball is wherever that window is, not at its docked pose.
+    if (this.docked && !drawsBall(bounds)) return insideBallOrigin(this.docked.side, this.docked.y, this.displayAt(center(bounds)))
+    if (isCollapsed(bounds)) return this.collapsedBallOrigin()
     return ballOriginFromWindow(bounds, this.direction)
   }
 
@@ -444,7 +493,7 @@ export class FloatingPlacement {
     this.window.setBounds(dockedTabBounds(side, y, bounds))
   }
 
-  private async snap(side: DockSide, ballY: number, bounds: Rect): Promise<DockState> {
+  private async snap(side: DockSide, ballY: number, bounds: Rect): Promise<ExpandState> {
     const y = clampBallY(ballY, bounds)
     this.docked = { side, y }
     await this.animate(
@@ -452,9 +501,15 @@ export class FloatingPlacement {
       DOCK_SLIDE_OFF_MS,
       easeInOutCubic,
     )
-    if (!this.docked || this.docked.side !== side) return { docked: this.docked?.side }
+    if (!this.docked || this.docked.side !== side) return this.expandState()
     this.window.setBounds(dockedTabBounds(side, y, bounds))
-    return { docked: side }
+    return this.expandState()
+  }
+
+  /** The layout as the window stands now, in the shape the page applies. */
+  private expandState(): ExpandState {
+    const expanded = !isCollapsed(this.window.getBounds()) && this.docked === undefined
+    return { expanded, ...this.direction, docked: this.docked?.side, strip: this.stripWidth }
   }
 
   private animate(end: Rect, durationMs: number, ease: (t: number) => number): Promise<void> {

@@ -119,24 +119,35 @@ ipcMain.handle('orb:expand', (event, expanded) => {
   return placement.setExpanded(expanded)
 })
 
-ipcMain.handle('orb:move', (event, request) => {
-  if (!fromBall(event) || !placement || !isMove(request)) return { docked: undefined }
-  return placement.move(request.x, request.y, request.canDock)
+// Drag: the renderer only signals. Every position comes from the OS cursor, which
+// shares the DIP space the window bounds use, so no renderer-side coordinate can go stale.
+ipcMain.on('orb:drag-press', (event) => {
+  if (!fromBall(event) || !placement) return
+  placement.press(cursorPoint())
 })
 
-ipcMain.handle('orb:clamp', async (event, payload) => {
+ipcMain.on('orb:drag-begin', (event) => {
+  if (!fromBall(event) || !placement) return
+  placement.beginDrag()
+})
+
+ipcMain.on('orb:drag-move', (event, canDock) => {
+  if (!fromBall(event) || !placement) return
+  placement.dragTo(cursorPoint(), canDock !== false)
+})
+
+ipcMain.handle('orb:drag-end', async (event, canDock) => {
   if (!fromBall(event) || !placement) return { docked: undefined }
-  const request = readClampRequest(payload)
-  const result = await placement.clamp(request.canDock, request.origin)
-  logDockDiagnostics(result, request.origin)
+  const cursor = cursorPoint()
+  const result = await placement.endDrag(cursor, canDock !== false)
+  logDockDiagnostics(cursor, result)
   return result
 })
 
-/** The renderer offsets pointer coordinates by this instead of `event.screenX`. */
-ipcMain.handle('orb:origin', (event) => {
-  if (!fromBall(event) || !placement) return undefined
-  return placement.screenOrigin()
-})
+function cursorPoint(): { x: number; y: number } {
+  const point = screen.getCursorScreenPoint()
+  return { x: point.x, y: point.y }
+}
 
 ipcMain.handle('orb:unsnap', async (event) => {
   if (!fromBall(event) || !placement) return { docked: undefined }
@@ -464,41 +475,14 @@ function write(message: unknown): void {
   live.write(`${JSON.stringify(message)}\n`)
 }
 
-function isMove(value: unknown): value is { x: number; y: number; canDock: boolean } {
-  if (typeof value !== 'object' || value === null) return false
-  const point = value as { x?: unknown; y?: unknown; canDock?: unknown }
-  return typeof point.x === 'number' && typeof point.y === 'number'
-    && Number.isFinite(point.x) && Number.isFinite(point.y)
-    && Math.abs(point.x) <= 100_000 && Math.abs(point.y) <= 100_000
-    && typeof point.canDock === 'boolean'
-}
-
-/** Accepts the legacy bare `canDock` boolean and the `{ canDock, origin }` payload. */
-function readClampRequest(value: unknown): { canDock: boolean; origin?: { x: number; y: number } } {
-  if (typeof value === 'boolean') return { canDock: value }
-  if (typeof value !== 'object' || value === null) return { canDock: true }
-  const record = value as { canDock?: unknown; origin?: unknown }
-  const canDock = record.canDock !== false
-  const origin = isPoint(record.origin) ? { x: record.origin.x, y: record.origin.y } : undefined
-  return { canDock, origin }
-}
-
-function isPoint(value: unknown): value is { x: number; y: number } {
-  if (typeof value !== 'object' || value === null) return false
-  const point = value as { x?: unknown; y?: unknown }
-  return typeof point.x === 'number' && typeof point.y === 'number'
-    && Number.isFinite(point.x) && Number.isFinite(point.y)
-    && Math.abs(point.x) <= 100_000 && Math.abs(point.y) <= 100_000
-}
-
 /**
  * Docking diagnostics, off unless `DSH_ORB_DOCK_DEBUG` is set. One stderr line per
- * drag release: the window bounds (`setBounds`/`getBounds` path), the renderer's
- * drag coordinates, every display with its scaleFactor, and the decision. A
- * machine that will not dock reports here exactly which coordinate space drifted,
- * which is the only way to diagnose a display/DPI layout we cannot reproduce.
+ * drag release: the cursor the drag ended on, the window bounds the OS applied,
+ * every display with its scaleFactor, and the decision. A machine that will not
+ * dock reports here, which is the only way to diagnose a display/DPI layout we
+ * cannot reproduce.
  */
-function logDockDiagnostics(result: { docked?: 'left' | 'right' }, remoteOrigin?: { x: number; y: number }): void {
+function logDockDiagnostics(cursor: { x: number; y: number }, result: { docked?: 'left' | 'right' }): void {
   if (process.env.DSH_ORB_DOCK_DEBUG !== '1') return
   if (!win || win.isDestroyed()) return
   const displays = screen.getAllDisplays().map((display) => ({
@@ -508,8 +492,8 @@ function logDockDiagnostics(result: { docked?: 'left' | 'right' }, remoteOrigin?
   }))
   console.error(`[orb-dock] ${JSON.stringify({
     electron: process.versions.electron,
+    cursor,
     window: win.getBounds(),
-    remote: remoteOrigin ?? null,
     displays,
     docked: result.docked ?? null,
   })}`)

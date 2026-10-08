@@ -271,7 +271,6 @@ function main() {
   let processGroup
   let processClock
   let dragging = false
-  let collapsing = false
   let skipClick = false
   let skipDockCommit = false
   let suppressExpand = false
@@ -281,24 +280,16 @@ function main() {
   let dockHoverTimer
   let collapseTimer
   let collapseFrame
-  let pointer
   /**
-   * Drag bookkeeping. `pointerHeld` spans the whole time a button is down, so
-   * enter/leave cannot flip the panel while a gesture is in flight; the pointer
-   * origin is derived from the OS window position plus `clientX/Y` (never from
-   * `screenX`, which Chromium computes off a cached window origin and therefore
-   * reports stale values exactly while the ball is moving under the cursor).
+   * Pointer bookkeeping. `pointerHeld` spans the whole time a button is down, so
+   * enter/leave cannot flip the panel while a gesture is in flight. The renderer
+   * never computes a window position: the main process reads the OS cursor on every
+   * drag signal, so `pressAt` (client coordinates) only serves the drag threshold
+   * and the dock tab's pull-out distance, both measured while the window is static.
    */
   let pointerHeld = false
   let pointerPointerId
-  let grab = { x: 0, y: 0 }
-  let grabAt = { x: 0, y: 0 }
-  let dragOrigin
-  let dragStart
-  /** Bumped per gesture so a collapse flush cannot apply a stale position. */
-  let dragSession = 0
-  let pendingOrigin
-  let moveRequest
+  let pressAt = { x: 0, y: 0 }
   let permission = 'danger-full-access'
   let permissionOpen = false
   let historyOpen = false
@@ -518,116 +509,69 @@ function main() {
 
   function applyDockedFrom(result) {
     if (result == null) return
+    // A release can re-anchor an open panel to the other side; the page follows the result.
+    if (result.expanded === true) applyDirection(result)
     applyDocked(result.docked)
   }
 
-  async function moveBall(x, y) {
-    pendingOrigin = { x, y }
-    if (moveRequest) return
-    // One move per frame: a Windows drag can deliver several pointermove events
-    // per repaint, and one awaited IPC round-trip per event queues up and lets
-    // the ball fall behind the cursor. A request that lands while a move is in
-    // flight replaces the pending one instead of queueing behind it.
-    moveRequest = true
-    try {
-      while (pendingOrigin !== undefined) {
-        const next = pendingOrigin
-        pendingOrigin = undefined
-        const dockedState = await api.move(next.x, next.y, !(running || asking()))
-        // A newer position arrived while this one was in flight; its own result wins.
-        if (next === pendingOrigin) applyDockedFrom(dockedState)
-      }
-    } finally {
-      moveRequest = false
-      pendingOrigin = undefined
-    }
-  }
-
   /**
-   * Latest position the finger asked for, applied when a busy loop (the panel
-   * collapsing at drag start) finishes. Without it the moves that land during the
-   * collapse are dropped and the ball starts from a stale spot.
+   * Press on `element`: keep the client point the drag threshold and the dock tab's
+   * pull are measured from (both while the window is still static), and capture the
+   * pointer so the gesture survives the window moving out from under the cursor.
    */
-  async function moveBallWhenIdle() {
-    const session = dragSession
-    while (moveRequest) await new Promise((resolve) => { setTimeout(resolve, 8) })
-    // The gesture may have ended (or a new one begun) while the collapse ran.
-    if (session !== dragSession || pendingOrigin === undefined) return
-    const next = pendingOrigin
-    pendingOrigin = undefined
-    await moveBall(next.x, next.y)
-  }
-
-  async function clampBall(origin) {
-    applyDockedFrom(await api.clamp(!(running || asking()), origin))
-  }
-
-  /** Window origin as the OS applied it, so pointer offsets stay exact mid-drag. */
-  function windowOrigin() {
-    if (dragOrigin !== undefined) return dragOrigin
-    // A page paired with an older preload has no bridge method; the drag then keeps
-    // its previous input path instead of failing outright.
-    if (typeof api.origin !== 'function') return Promise.resolve(undefined)
-    return api.origin().then((point) => {
-      if (point !== undefined && point !== null) dragOrigin = point
-      return dragOrigin
-    })
-  }
-
-  /**
-   * Start a gesture on `element`: freeze the window origin, remember where inside
-   * the element the cursor grabbed, and capture the pointer so the drag survives
-   * the window moving out from under the cursor.
-   */
-  function beginDrag(element, event) {
-    const rect = element.getBoundingClientRect()
-    grab = { x: event.clientX - rect.left, y: event.clientY - rect.top }
-    grabAt = { x: event.clientX, y: event.clientY }
+  function beginPointer(element, event) {
+    pressAt = { x: event.clientX, y: event.clientY }
     pointerPointerId = event.pointerId
     pointerHeld = true
-    dragSession += 1
-    dragOrigin = undefined
-    dragStart = undefined
-    void windowOrigin()
     element.setPointerCapture(event.pointerId)
   }
 
-  /** Pointer coordinates while a gesture is live; undefined once it ended. */
-  function dragPointer(event) {
-    if (pointerPointerId === undefined) return undefined
-    if (event.pointerId !== undefined && event.pointerId !== pointerPointerId) return undefined
-    if (!Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return undefined
-    return { x: event.clientX, y: event.clientY }
-  }
-
-  function dragPosition(event, base) {
-    const point = dragPointer(event)
-    if (point === undefined) return undefined
-    return { x: base.x + point.x - grab.x, y: base.y + point.y - grab.y }
-  }
-
-  function endDrag() {
-    pointerHeld = false
-    pointerPointerId = undefined
-    pointer = undefined
+  function ownsPointer(event) {
+    if (pointerPointerId === undefined) return false
+    return event.pointerId === undefined || event.pointerId === pointerPointerId
   }
 
   // A gesture that ends outside the window (or while the compositor holds the
   // capture) must never leave the panel locked shut.
   window.addEventListener('blur', () => {
-    if (pointerHeld) releaseDrag()
+    if (pointerHeld) void finishGesture()
   })
 
-  /** Drop the origin cache once a gesture ends: the window may move before the next one. */
-  function releaseDrag() {
-    endDrag()
-    dragSession += 1
-    dragOrigin = undefined
-    dragStart = undefined
+  /**
+   * The gesture is over. A drag is committed by the main process, which places the
+   * ball under the OS cursor and decides the dock. A press without a drag is left to
+   * the click handler, so this returns false.
+   */
+  async function finishGesture() {
+    const moved = dragging
+    pointerHeld = false
+    pointerPointerId = undefined
+    dragging = false
+    if (!moved) return false
+    skipClick = true
+    const skipDock = skipDockCommit
+    skipDockCommit = false
+    if (!skipDock) applyDockedFrom(await api.dragEnd(!(running || asking())))
+    return true
+  }
+
+  /**
+   * The ball gesture passed the motion threshold. A free panel collapses first: its
+   * DOM now, its window in the main process, before any move signal goes out. A
+   * running or asking agent keeps the panel open and the ball simply follows.
+   */
+  function startBallDrag() {
+    dragging = true
+    if (!(running || asking())) {
+      pinned = false
+      document.body.classList.remove('pinned')
+      void setExpanded(false, true)
+    }
+    api.dragBegin()
   }
 
   function syncExpand() {
-    if (pointerHeld || dragging || collapsing) return
+    if (pointerHeld || dragging) return
     if (docked !== undefined) {
       if (dockHoverArmed) void unsnapDocked()
       return
@@ -2070,99 +2014,44 @@ function main() {
 
   document.body.addEventListener('pointerenter', (event) => {
     dockPointerInside = true
-    // A dropped pointerup (capture stolen, window hidden mid-gesture) would leave
-    // the drag flags stuck and the panel permanently unable to expand. Only a
-    // reported "no buttons" counts: an absent field must not end a live drag.
-    if (pointerHeld && typeof event.buttons === 'number' && event.buttons === 0) releaseDrag()
+    // A dropped pointerup (capture stolen, window hidden mid-gesture) would leave the
+    // press flags stuck and the panel permanently unable to expand. Only a reported
+    // "no buttons" counts: an absent field must not end a live drag.
+    if (pointerHeld && typeof event.buttons === 'number' && event.buttons === 0) void finishGesture()
     syncExpand()
   })
   document.body.addEventListener('pointerleave', () => {
     dockPointerInside = false
     suppressExpand = false
-    if (pointerHeld) return
-    if (dragging || collapsing) return
+    if (pointerHeld || dragging) return
     scheduleCollapse()
   })
 
   ball.addEventListener('pointerdown', (event) => {
     if (!isPrimaryButton(event)) return
     dragging = false
-    collapsing = false
     skipClick = false
-    beginDrag(ball, event)
+    beginPointer(ball, event)
+    api.dragPress()
   })
   ball.addEventListener('pointermove', (event) => {
-    if (pointerPointerId === undefined) return
+    if (!ownsPointer(event)) return
     if (!primaryButtonHeld(event)) {
-      void finishPointer(event)
+      void finishGesture()
       return
     }
-    const start = { x: event.clientX - grab.x, y: event.clientY - grab.y }
-    dragStart = start
-    const base = dragOrigin
-    if (base === undefined) {
-      // The cached window origin has not answered yet. Only the motion threshold
-      // is live; re-emit the latest position once it lands so the start is not lost.
-      void windowOrigin().then((point) => {
-        if (!pointerHeld || dragging || point === undefined || dragOrigin === undefined || dragStart === undefined) return
-        applyDragStart({ x: point.x + dragStart.x, y: point.y + dragStart.y }, dragOrigin)
-      })
-      return
+    if (!dragging) {
+      if (Math.hypot(event.clientX - pressAt.x, event.clientY - pressAt.y) <= 4) return
+      startBallDrag()
     }
-    const origin = { x: base.x + start.x, y: base.y + start.y }
-    if (dragging) {
-      // Record even while the panel is still collapsing: the collapse resolves
-      // into a move of the latest position, not of the one that started the drag.
-      void moveBall(origin.x, origin.y)
-      return
-    }
-    if (Math.hypot(event.clientX - grabAt.x, event.clientY - grabAt.y) <= 4) return
-    applyDragStart(origin, base)
+    api.dragMove(!(running || asking()))
   })
-
-  /** The gesture passed the motion threshold: collapse the panel, then start moving. */
-  function applyDragStart(origin, base) {
-    dragging = true
-    if (running || asking()) {
-      void moveBall(origin.x, origin.y)
-      return
-    }
-    collapsing = true
-    pinned = false
-    document.body.classList.remove('pinned')
-    void setExpanded(false, true).then(() => {
-      collapsing = false
-      // The pointer kept moving while the panel collapsed; that loop applies the
-      // newest of those positions rather than the one that started the gesture.
-      void moveBallWhenIdle()
-    })
-  }
-  async function finishPointer(event) {
-    const base = dragOrigin
-    const moved = dragging
-    const where = base === undefined ? undefined : dragPosition(event, base)
-    skipClick = moved
-    dragging = false
-    collapsing = false
-    releaseDrag()
-    if (!moved) return false
-    const skipDock = skipDockCommit
-    skipDockCommit = false
-    if (!skipDock) {
-      if (where !== undefined) await moveBall(where.x, where.y)
-      // `where` may be undefined (a lost capture hands us an event with no pointer
-      // coordinates); the clamp still has to run so the dock commits, because the
-      // main process judges the release from the window bounds it applied.
-      await clampBall(where)
-    }
-    return true
-  }
   ball.addEventListener('pointerup', async (event) => {
     if (!isPrimaryButton(event)) {
-      void finishPointer(event)
+      void finishGesture()
       return
     }
-    const dragged = await finishPointer(event)
+    const dragged = await finishGesture()
     if (dragged || skipClick) {
       skipClick = false
       return
@@ -2171,31 +2060,29 @@ function main() {
     document.body.classList.toggle('pinned', pinned)
     if (pinned) await setExpanded(true)
   })
-  ball.addEventListener('pointercancel', (event) => { void finishPointer(event) })
-  ball.addEventListener('lostpointercapture', (event) => { void finishPointer(event) })
+  ball.addEventListener('pointercancel', () => { void finishGesture() })
+  ball.addEventListener('lostpointercapture', () => { void finishGesture() })
 
   dockTab.addEventListener('pointerdown', (event) => {
     if (!isPrimaryButton(event)) return
     dragging = false
-    collapsing = false
     skipClick = true
-    pointer = { x: event.clientX, y: event.clientY }
-    beginDrag(dockTab, event)
+    beginPointer(dockTab, event)
   })
   dockTab.addEventListener('pointermove', (event) => {
-    if (pointerPointerId === undefined || docked === undefined) return
+    if (!ownsPointer(event) || docked === undefined) return
     if (!primaryButtonHeld(event)) {
-      void finishPointer(event)
+      void finishGesture()
       return
     }
-    const pulled = docked === 'right' ? pointer.x - event.clientX : event.clientX - pointer.x
+    const pulled = docked === 'right' ? pressAt.x - event.clientX : event.clientX - pressAt.x
     if (pulled <= DOCK_DRAG_OFF_PX) return
     dragging = true
     void unsnapDocked()
   })
-  dockTab.addEventListener('pointerup', (event) => { void finishPointer(event) })
-  dockTab.addEventListener('pointercancel', (event) => { void finishPointer(event) })
-  dockTab.addEventListener('lostpointercapture', (event) => { void finishPointer(event) })
+  dockTab.addEventListener('pointerup', () => { void finishGesture() })
+  dockTab.addEventListener('pointercancel', () => { void finishGesture() })
+  dockTab.addEventListener('lostpointercapture', () => { void finishGesture() })
 
   const selectionChip = document.querySelector('#selection-chip')
   const selectionChipText = document.querySelector('#selection-chip-text')

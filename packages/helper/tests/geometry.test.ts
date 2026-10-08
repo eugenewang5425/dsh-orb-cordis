@@ -49,23 +49,26 @@ describe('edge-contact docking', () => {
     assert.equal(lastBounds.get(placed)?.x, 1360 - CHROME_INSET)
   })
 
-  it('docks from the renderer origin when the window bounds stay inside (DPI drift)', async () => {
+  it('docks at the edge the cursor reaches on release, whatever the grab offset', async () => {
     const displays = [pair(0, 0, 1440, 900)]
-    const placed = placement(displays, 1350, 400)
-    placed.move(1350, 400)
-    const state = await placed.clamp(true, { x: 1380, y: 410 })
-    assert.equal(state.docked, 'right')
-    const bounds = lastBounds.get(placed)
-    assert.ok(bounds)
-    assert.equal(bounds.x + bounds.width, 1440)
-  })
+    for (const grabX of [0, 36, 71]) {
+      const right = placement(displays, 1000, 400)
+      right.press({ x: 1000 + grabX, y: 430 })
+      right.beginDrag()
+      right.dragTo({ x: 1439, y: 430 })
+      const docked = await right.endDrag({ x: 1439, y: 430 })
+      assert.equal(docked.docked, 'right', `right edge, grab ${grabX}`)
+      const bounds = lastBounds.get(right)
+      assert.ok(bounds)
+      assert.equal(bounds.x + bounds.width, 1440)
 
-  it('docks on the left edge from the renderer origin alone', async () => {
-    const displays = [pair(0, 0, 1440, 900)]
-    const placed = placement(displays, 30, 400)
-    placed.move(30, 400)
-    const state = await placed.clamp(true, { x: 0, y: 420 })
-    assert.equal(state.docked, 'left')
+      const left = placement(displays, 1000, 400)
+      left.press({ x: 1000 + grabX, y: 430 })
+      left.beginDrag()
+      left.dragTo({ x: 0, y: 430 })
+      const leftDocked = await left.endDrag({ x: 0, y: 430 })
+      assert.equal(leftDocked.docked, 'left', `left edge, grab ${grabX}`)
+    }
   })
 })
 
@@ -100,20 +103,27 @@ describe('docking under DPI rounding', () => {
     assert.equal(state.docked, undefined)
   })
 
-  it('accepts a renderer origin that ran past the left edge', async () => {
+  it('docks a ball that the drag pushed past the left edge of the primary display', async () => {
     const displays = [pair(0, 0, 1440, 900)]
     const placed = placement(displays, 20, 400)
-    placed.move(20, 400)
-    const state = await placed.clamp(true, { x: -6, y: 420 })
+    placed.press({ x: 30, y: 430 })
+    placed.beginDrag()
+    // The grab is (10, 30); a cursor at x = 4 puts the ball origin at x = -6.
+    placed.dragTo({ x: 4, y: 430 })
+    const state = await placed.endDrag({ x: 4, y: 430 })
     assert.equal(state.docked, 'left')
   })
 
-  it('reports the applied window origin for the renderer pointer offset', () => {
+  it('moves the ball by cursor minus the grab recorded at press', () => {
     const displays = [pair(0, 0, 1920, 1080)]
     const placed = placement(displays, 1600, 500)
-    assert.deepEqual(placed.screenOrigin(), { x: 1600, y: 500 })
-    placed.move(900, 300)
-    assert.deepEqual(placed.screenOrigin(), { x: 900, y: 300 })
+    placed.press({ x: 1620, y: 530 })
+    placed.beginDrag()
+    placed.dragTo({ x: 920, y: 330 })
+    const bounds = lastBounds.get(placed)
+    assert.ok(bounds)
+    assert.equal(bounds.x + CHROME_INSET, 900)
+    assert.equal(bounds.y + CHROME_INSET, 300)
   })
 })
 
@@ -184,6 +194,75 @@ describe('bookmark strip geometry', () => {
     const origin = ballOriginFromWindow(bounds, { horizontal: 'left', vertical: 'up' })
     assert.equal(origin.x, 1500)
     assert.equal(origin.y, 500)
+  })
+})
+
+describe('release layout', () => {
+  it('reports the panel direction an open panel took when it re-anchors on release', async () => {
+    const displays = [pair(0, 0, 1920, 1080)]
+    // Opened from the right half, so the panel grows left.
+    const placed = placement(displays, 1500, 400)
+    assert.equal(placed.setExpanded(true).horizontal, 'left')
+    // A running agent keeps the panel open while the ball is carried past the screen midline.
+    placed.press({ x: 1530, y: 430 })
+    placed.beginDrag()
+    placed.dragTo({ x: 730, y: 430 }, false)
+    const released = await placed.endDrag({ x: 730, y: 430 }, false)
+    assert.equal(released.expanded, true)
+    assert.equal(released.horizontal, 'right')
+    const bounds = lastBounds.get(placed)
+    assert.ok(bounds)
+    // The window and the reported direction must agree on where the ball is.
+    assert.deepEqual(ballOriginFromWindow(bounds, released), { x: 700, y: 400 })
+  })
+
+  it('grabs a press during the slide-off where the ball is drawn, not at its docked pose', async () => {
+    const displays = [pair(0, 0, 1440, 900)]
+    const placed = placement(displays, 1368, 400)
+    placed.move(1368, 400)
+    const docking = placed.clamp()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const mid = lastBounds.get(placed)
+    assert.ok(mid)
+    const drawnAt = mid.x + CHROME_INSET
+    assert.ok(drawnAt > 1368 && drawnAt < 1442, `still mid-slide at ${drawnAt}`)
+
+    placed.press({ x: drawnAt + 30, y: 430 })
+    placed.beginDrag()
+    placed.dragTo({ x: drawnAt - 70, y: 430 })
+    // The ball must move by exactly the cursor's travel from where it was drawn.
+    assert.equal(lastBounds.get(placed)?.x, drawnAt - 70 - 30 - CHROME_INSET)
+    const outcome = await docking
+    assert.equal(outcome.docked, undefined)
+  })
+
+  it('keeps the ball whole when a taken slide-off is dragged back into the edge zone', async () => {
+    const displays = [pair(0, 0, 1440, 900)]
+    const placed = placement(displays, 1368, 400)
+    placed.move(1368, 400)
+    const docking = placed.clamp()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const drawnAt = (lastBounds.get(placed)?.x ?? 0) + CHROME_INSET
+    placed.press({ x: drawnAt + 30, y: 430 })
+    placed.beginDrag()
+    // The ball's origin lands at x = 1416, inside the zone where a docked tab would be kept.
+    placed.dragTo({ x: 1446, y: 430 })
+    assert.equal(lastBounds.get(placed)?.width, BALL_WINDOW_SIZE)
+    await docking
+  })
+
+  it('stops an unfinished slide-off when the panel opens, so the slide cannot overwrite it', async () => {
+    const displays = [pair(0, 0, 1440, 900)]
+    const placed = placement(displays, 1368, 400)
+    placed.move(1368, 400)
+    const docking = placed.clamp()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    const opened = placed.setExpanded(true)
+    assert.equal(opened.expanded, true)
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    assert.equal(lastBounds.get(placed)?.width, PANEL_WINDOW_SIZE.width)
+    const outcome = await docking
+    assert.equal(outcome.expanded, true)
   })
 })
 
