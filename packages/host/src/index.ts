@@ -9,7 +9,7 @@ import { registerOrbRoutes } from './routes.ts'
 import { installOrbServices, watchOrbPermissions } from './services.ts'
 import { watchAppearance } from './appearance.ts'
 import { OrbRuntime, type OrbContext } from './orb.ts'
-import { UpdateChecker } from './update.ts'
+import { exemptReleaseAge, ownPackage, UpdateChecker } from './update.ts'
 
 /** Cordis plugin name. */
 export const name = 'orb-host'
@@ -35,6 +35,14 @@ export type { OrbContext }
 export function apply(ctx: OrbContext, config: { autoStart?: boolean } = {}): void {
   logWebPort(ctx)
   const store = new ProfileStore(profileDirectory(ctx))
+  // pnpm appends a `name@version` rule for every young release it installs and reads
+  // only the first rule per package name, so a profile that installed this plugin
+  // through the market or `dsh plugin install` holds an exemption that shadows the
+  // installed version — and then removing ANY other plugin fails with
+  // ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED. Re-canonicalise the list at
+  // start, whatever route installed the version.
+  const own = ownPackage()
+  if (own !== undefined) exemptReleaseAge(store.dir, own.name)
   const tcc = new TccMonitor()
   const runtime = new OrbRuntime(ctx, store, { tcc })
   installOrbServices(ctx, store)
