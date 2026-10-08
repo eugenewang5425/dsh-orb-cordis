@@ -90,9 +90,9 @@ Releases are published to the npm registry and served from npmmirror. The instal
   dsh plugin add dsh-orb
   ```
 
-- **By tarball URL** — `https://registry.npmmirror.com/dsh-orb/-/dsh-orb-<version>.tgz` (npmjs mirror: `https://registry.npmjs.org/dsh-orb/-/dsh-orb-<version>.tgz`).
+- **By version** — `dsh-orb@<version>`. An explicit version skips the release-age gate, and pnpm records `integrity` from registry metadata. Do not paste a remote tarball URL such as `https://registry.npmmirror.com/dsh-orb/-/dsh-orb-<version>.tgz`: pnpm 11.7, which the official client bundles, rejects that URL because the lockfile entry has no `integrity`.
 
-**A just-published version can resolve to the previous one for up to 24 hours.** The official client bundles pnpm 11, whose `minimumReleaseAge` default (1440 minutes) makes a named install settle for the newest version published more than 24 hours ago — a supply-chain guard, not a network problem. To get a fresh release immediately, install `dsh-orb@<version>` (an explicit version skips the gate and leaves a clean lockfile), use the tarball URL (above), or exempt the package in the profile's `pnpm-workspace.yaml`:
+**A just-published version can resolve to the previous one for up to 24 hours.** The official client bundles pnpm 11, whose `minimumReleaseAge` default (1440 minutes) makes a named install settle for the newest version published more than 24 hours ago — a supply-chain guard, not a network problem. To get a fresh release immediately, install `dsh-orb@<version>`, or exempt the package in the profile's `pnpm-workspace.yaml`:
 
 ```yaml
 minimumReleaseAgeExclude:
@@ -101,7 +101,7 @@ minimumReleaseAgeExclude:
 
 With an older version installed there is no need to reinstall: the floating-ball card in the main window's settings page checks for and installs updates, and records the exemption itself.
 
-**Does the in-app update fail with `operation-error`?** Install the tarball URL above from the plugin page instead — releases before 0.1.3 asked the plugin manager for a GitHub release tarball this repository never publishes, so their update button can fail. Installing the tarball once replaces the bundle and future updates work. The raw failure detail lives in the profile's `.plugin-manager/logs/operation-*/pnpm.log`.
+**Does the in-app update fail with `operation-error`?** Releases through 0.1.4 handed pnpm 11.7 (the client bundles that version) an npmmirror tarball URL. That URL is stored without an `integrity` field, so pnpm rejects it before downloading (`ERR_PNPM_MISSING_TARBALL_INTEGRITY`) and the card only shows the generic `operation-error`. Install `dsh-orb@<version>` from the plugin page — not the tarball URL. After that, the update button installs by version and asks npmmirror first. The raw failure detail lives in the profile's `.plugin-manager/logs/operation-*/pnpm.log`.
 
 ### From a local build
 

@@ -90,9 +90,9 @@ Helper（自带的下载版 Electron，独立 userData）
   dsh plugin add dsh-orb
   ```
 
-- **按 tarball 直链装**——`https://registry.npmmirror.com/dsh-orb/-/dsh-orb-<版本>.tgz`（npmjs 主站：`https://registry.npmjs.org/dsh-orb/-/dsh-orb-<版本>.tgz`）。
+- **按版本号装**——`dsh-orb@<版本>`。显式版本会跳过发布年龄闸门，pnpm 从 registry 元数据写入 `integrity`。不要把 `https://registry.npmmirror.com/dsh-orb/-/dsh-orb-<版本>.tgz` 这种直链贴进插件页：官方客户端自带的 pnpm 11.7 会因为 lockfile 没有 `integrity` 拒绝远程 tarball 直链。
 
-**刚发布的版本在 24 小时内按名字装可能仍解析到上一个版本。** 官方客户端内置的 pnpm 11 默认开启 `minimumReleaseAge`（1440 分钟）：按名字解析时会退回到"发布满 24 小时的最新版本"——这是供应链保护，不是网络问题。想立即拿到新版本：装 `dsh-orb@<版本号>`（显式版本会跳过闸门、留下干净的 lockfile）、用上面的 tarball 直链、或在 profile 的 `pnpm-workspace.yaml` 里豁免该包：
+**刚发布的版本在 24 小时内按名字装可能仍解析到上一个版本。** 官方客户端内置的 pnpm 11 默认开启 `minimumReleaseAge`（1440 分钟）：按名字解析时会退回到"发布满 24 小时的最新版本"——这是供应链保护，不是网络问题。想立即拿到新版本：装 `dsh-orb@<版本号>`，或在 profile 的 `pnpm-workspace.yaml` 里豁免该包：
 
 ```yaml
 minimumReleaseAgeExclude:
@@ -101,7 +101,7 @@ minimumReleaseAgeExclude:
 
 已装旧版时无需重装：主窗口设置页的悬浮球卡片可检查并一键更新（更新流程会自己写入这条豁免）。
 
-**插件内更新报 `operation-error` 怎么办？** 改用插件页安装上面的 tarball 直链——0.1.3 之前的版本会让插件管理器去取本仓库从未发布过的 GitHub release 包，更新按钮因此可能失败；手动装一次 tarball 即替换旧包，之后的更新恢复正常。原始失败细节在 profile 的 `.plugin-manager/logs/operation-*/pnpm.log` 里。
+**插件内更新报 `operation-error` 怎么办？** 0.1.4 及更早的更新按钮把 npmmirror 的 tarball 直链交给官方客户端自带的 pnpm 11.7。这种直链在 lockfile 里没有 `integrity`，pnpm 会在下载前拒绝（`ERR_PNPM_MISSING_TARBALL_INTEGRITY`），界面只显示笼统的 `operation-error`。请在插件页按版本号安装 `dsh-orb@<版本>`（不要贴 tarball 直链）。装上之后，更新按钮改为按版本号安装，并先问 npmmirror。原始失败细节在 profile 的 `.plugin-manager/logs/operation-*/pnpm.log` 里。
 
 ### 从本地构建安装
 
